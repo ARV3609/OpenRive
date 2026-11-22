@@ -65,6 +65,13 @@ jobs:
       # Everything runs inside try/catch and the failure is reported as an
       # ::error:: annotation with the tree listing, so a red run says why without
       # anyone having to open the raw job log.
+      # Electrobun 2.x leaves several things in apps/desktop/artifacts on Windows:
+      # a "-Setup.zip" installer stub of about a megabyte (it expects the update
+      # archive beside it, so it is not runnable on its own), a "-OpenRive.tar.zst"
+      # holding the actual app bundle (tens of megabytes), and the updater
+      # manifest. The runnable zip is therefore built from the app inside the
+      # archive, not from the stub. Everything is reported through ::notice and
+      # ::error annotations, because job logs are not always reachable.
       - name: Package the zip
         shell: pwsh
         run: |
@@ -73,6 +80,7 @@ jobs:
           $artifacts = 'apps/desktop/artifacts'
           $named = 'dist/OpenRive-win-x64-' + $version + '.zip'
           $latest = 'dist/OpenRive-win-x64-latest.zip'
+          $note = New-Object System.Collections.Generic.List[string]
 
           function Show-Tree($dir, $depth) {
             if (-not (Test-Path $dir)) { Write-Host ('  ' + $dir + ': missing'); return }
@@ -87,58 +95,67 @@ jobs:
 
           try {
             New-Item -ItemType Directory -Force dist | Out-Null
-
             Write-Host '--- what the build produced'
-            foreach ($dir in @($artifacts, 'apps/desktop/build', 'build', 'dist')) {
-              Write-Host ('--- ' + $dir)
-              Show-Tree $dir 2
-            }
+            Show-Tree $artifacts 3
 
             $files = @(Get-ChildItem $artifacts -Recurse -File -ErrorAction SilentlyContinue)
-            $built = $files | Where-Object { $_.Extension -eq '.zip' } | Sort-Object Length -Descending | Select-Object -First 1
-            if ($built) {
-              Write-Host ('using the zip the build made: ' + $built.Name)
-              Copy-Item -LiteralPath $built.FullName -Destination $named
+            $stub = $files | Where-Object { $_.Extension -eq '.zip' } | Sort-Object Length -Descending | Select-Object -First 1
+            $archive = $files | Where-Object { $_.Name -like '*.tar.zst' } | Sort-Object Length -Descending | Select-Object -First 1
+
+            $appDir = $null
+            if ($archive) {
+              # tar on the Windows runner is bsdtar: it reads zstd archives
+              $extract = Join-Path $env:RUNNER_TEMP 'app'
+              New-Item -ItemType Directory -Force $extract | Out-Null
+              Write-Host ('extracting ' + $archive.Name + ' (' + [math]::Round($archive.Length / 1MB, 1) + ' MB)')
+              tar -xf $archive.FullName -C $extract
+              if ($LASTEXITCODE -ne 0) { throw ('tar failed to extract ' + $archive.Name) }
+
+              # the app is the largest executable; the 1.2 MB *-Setup.exe is a stub
+              $exe = Get-ChildItem $extract -Recurse -File -Filter *.exe |
+                Sort-Object Length -Descending | Select-Object -First 1
+              if ($exe) {
+                $appDir = Split-Path $exe.FullName -Parent
+                $note.Add(('app: ' + $exe.Name + ' (' + [math]::Round($exe.Length / 1MB, 1) + ' MB) in ' + $appDir))
+              } else {
+                $note.Add('the update archive held no .exe; falling back to the installer stub')
+              }
+            } elseif ($stub) {
+              $note.Add(('no update archive; falling back to ' + $stub.Name))
+            }
+
+            if ($appDir) {
+              Compress-Archive -Path (Join-Path $appDir '*') -DestinationPath $named
+            } elseif ($stub) {
+              Copy-Item -LiteralPath $stub.FullName -Destination $named
             } elseif ($files.Count -gt 0) {
-              Write-Host 'no zip in the artifacts; archiving the folder here'
               Compress-Archive -Path (Join-Path $artifacts '*') -DestinationPath $named
             } else {
-              # The toolchain put the app somewhere else: find the executable and
-              # pack the app folder around it.
-              Write-Host '--- no artifacts folder; searching the tree for the app'
-              $exe = @(Get-ChildItem . -Recurse -File -Filter *.exe -ErrorAction SilentlyContinue |
-                Where-Object { $_.FullName -notlike '*node_modules*' -and $_.FullName -notlike '*.hutch*' } |
-                Where-Object { $_.Name -notlike 'bun.exe' -and $_.Name -notlike '*.Helper.exe' })
-              foreach ($e in $exe) { Write-Host ('  exe: ' + $e.FullName + '  ' + [math]::Round($e.Length / 1MB, 2) + ' MB') }
-              if ($exe.Count -eq 0) {
-                throw 'the build produced no zip, no artifacts and no .exe anywhere in the tree'
-              }
-              $app = $exe[0]
-              $root = Split-Path $app.FullName -Parent
-              Write-Host ('packing ' + $root)
-              Compress-Archive -Path (Join-Path $root '*') -DestinationPath $named
-              # the updater manifest, when the build wrote one next to the app
-              Get-ChildItem . -Recurse -File -Include '*-update.json' -ErrorAction SilentlyContinue |
-                Where-Object { $_.FullName -notlike '*node_modules*' } |
-                Select-Object -First 1 |
-                Copy-Item -Destination dist -ErrorAction SilentlyContinue
+              throw 'the build produced no artifacts at all'
             }
 
             if (-not (Test-Path $named)) { throw 'packaging produced no zip' }
             Copy-Item -LiteralPath $named -Destination $latest
-            $files | Where-Object { $_.Extension -in '.json', '.zst', '.patch' } |
-              Copy-Item -Destination dist -ErrorAction SilentlyContinue
+
+            # ship the installer stub, the updater archive and the manifest beside it
+            foreach ($f in $files | Where-Object { $_.Extension -in '.json', '.zst', '.patch', '.zip' }) {
+              Copy-Item -LiteralPath $f.FullName -Destination (Join-Path 'dist' ('installer-' + $f.Name)) -ErrorAction SilentlyContinue
+            }
             Get-ChildItem dist -File |
               ForEach-Object { Write-Host ('dist: ' + $_.Name + '  ' + [math]::Round($_.Length / 1MB, 2) + ' MB') }
+
+            $line = 'packaged ' + (Split-Path $named -Leaf) + ' from ' + ($note -join '; ')
+            Write-Host $line
+            Write-Host ('::notice title=Windows zip::' + $line)
+            $line >> $env:GITHUB_STEP_SUMMARY
           } catch {
-            # one readable annotation, so a red run explains itself
             $summary = @('packaging failed: ' + $_.Exception.Message)
             foreach ($dir in @($artifacts, 'apps/desktop/build', 'build')) {
               if (Test-Path $dir) {
                 $items = @(Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue)
-                $summary += $dir + ': ' + $items.Count + ' files'
+                $summary += ($dir + ': ' + $items.Count + ' files')
                 $summary += @($items | Select-Object -First 12 | ForEach-Object { $_.FullName })
-              } else { $summary += $dir + ': missing' }
+              } else { $summary += ($dir + ': missing') }
             }
             Write-Host ($summary -join "`n")
             Write-Host ('::error title=Packaging::' + ($summary -join ' | '))
@@ -155,6 +172,10 @@ jobs:
               Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue |
                 ForEach-Object { Write-Host ('  ' + $_.FullName + '  ' + [math]::Round($_.Length / 1MB, 1) + ' MB') }
             } else { Write-Host '  (missing)' }
+          }
+          foreach ($archive in @(Get-ChildItem 'apps/desktop/artifacts' -Filter '*.tar.zst' -ErrorAction SilentlyContinue)) {
+            Write-Host ('--- contents of ' + $archive.Name)
+            tar -tf $archive.FullName 2>&1 | Select-Object -First 40 | ForEach-Object { Write-Host ('  ' + $_) }
           }
 
       - name: Check the zip holds the app
