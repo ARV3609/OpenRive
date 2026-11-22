@@ -171,6 +171,13 @@ jobs:
             throw "the zip contains no .exe, only: $seen"
           }
           Write-Host ('zip contains ' + $exe.Name + ' (' + [math]::Round($exe.Length / 1MB, 1) + ' MB)')
+          # Visible on the run page without downloading anything.
+          $top = @(Get-ChildItem $out | ForEach-Object { $_.Name })
+          $count = @(Get-ChildItem $out -Recurse -File).Count
+          $line = 'zip holds ' + $exe.Name + ' (' + [math]::Round($exe.Length / 1MB, 1) + ' MB), ' + $count + ' files, top level: ' + ($top -join ', ')
+          Write-Host $line
+          Write-Host ('::notice title=Windows zip::' + $line)
+          $line >> $env:GITHUB_STEP_SUMMARY
 
       - name: Upload the workflow artifact
         uses: actions/upload-artifact@v4
