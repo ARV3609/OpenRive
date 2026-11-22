@@ -156,8 +156,13 @@ jobs:
             if (-not (Test-Path $named)) { throw 'packaging produced no zip' }
             Copy-Item -LiteralPath $named -Destination $latest
 
-            # ship the installer stub, the updater archive and the manifest beside it
-            foreach ($f in $files | Where-Object { $_.Extension -in '.json', '.zst', '.patch', '.zip' }) {
+            # The updater manifest names its archive and patches, so those keep
+            # their exact names. Only the installer stub is renamed, because
+            # "OpenRive-win-x64-latest.zip" now means the runnable app.
+            foreach ($f in $files | Where-Object { $_.Extension -in '.json', '.zst', '.patch' }) {
+              Copy-Item -LiteralPath $f.FullName -Destination (Join-Path 'dist' $f.Name) -ErrorAction SilentlyContinue
+            }
+            foreach ($f in $files | Where-Object { $_.Extension -eq '.zip' }) {
               Copy-Item -LiteralPath $f.FullName -Destination (Join-Path 'dist' ('installer-' + $f.Name)) -ErrorAction SilentlyContinue
             }
             Get-ChildItem dist -File |
@@ -273,6 +278,14 @@ jobs:
           $files = Get-ChildItem dist -File |
             Where-Object { $_.Name -notmatch 'win-x64-\d+\.\d+\.\d+' -and $_.Name -notlike 'installer-OpenRive-win-x64-*' } |
             ForEach-Object { $_.FullName }
+
+          # drop versioned zips an earlier run published, so the release stays small
+          $stale = gh release view $tag --repo $repo --json assets -q '.assets[].name' |
+            Where-Object { $_ -match '^OpenRive-win-x64-\d+\.\d+\.\d+.*\.zip$' }
+          foreach ($name in $stale) {
+            Write-Host ('removing stale ' + $name)
+            gh release delete-asset $tag $name --repo $repo --yes
+          }
           foreach ($f in $files) { Write-Host ('publishing ' + (Split-Path $f -Leaf)) }
           gh release upload $tag @files --repo $repo --clobber
           if ($LASTEXITCODE -ne 0) { throw 'uploading the zip failed' }
