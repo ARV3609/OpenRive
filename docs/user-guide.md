@@ -93,9 +93,12 @@ or another tab) changes the file while it's open, a banner lets you reload or ke
 
 ### State machines
 
-State machines make files interactive:
+State machines make files interactive. The state machine view follows Rive's editor: the graph fills the
+panel, the **Inputs** and **Listeners** strips down the left edge unfurl their columns when clicked, and the
+layer tabs, zoom percentage and **Add state** sit in a toolbar on top of the canvas. Drag empty space to pan,
+`Ctrl`/`Cmd` + scroll to zoom, and drag from a state's blue dot to another state to link them.
 
-1. Add a state machine, and **properties** in the Data tab (number, boolean, trigger, string, color).
+1. Add a state machine, and **properties** in the Inputs column (number, boolean, trigger, string, color, enum).
    Properties are what your app sets at runtime; they replace state machine inputs, which Rive deprecated
    (see [data binding](data-binding.md)).
 2. Add **states** with **Add state** (or right-click the graph) and pick a timeline for each. Add a **1D blend state**

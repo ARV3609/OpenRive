@@ -1,6 +1,24 @@
 'use client';
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { Braces, Hash, MousePointerClick, Palette, Play, Plus, Square, ToggleLeft, Trash2, Type, Zap, Radio } from 'lucide-react';
+import {
+  ArrowRight,
+  Asterisk,
+  Braces,
+  ChevronDown,
+  CornerDownRight,
+  Hash,
+  MousePointerClick,
+  Palette,
+  Play,
+  Plus,
+  Square,
+  ToggleLeft,
+  Trash2,
+  Layers,
+  Type,
+  Zap,
+  Radio,
+} from 'lucide-react';
 import { ArtboardDoc, CoreObj, RiveDoc } from '@openrive/rive/document';
 import { newLayer, obj } from '@openrive/rive/factory';
 import { findArtboard, findObj } from '@openrive/rive/ops';
@@ -32,8 +50,69 @@ import { displayName } from './Hierarchy';
 import { engineRef } from './engineRef';
 import { MenuItem, openContextMenu, sep } from './ContextMenu';
 
-const NODE_W = 132;
-const NODE_H = 34;
+// Rive's graph nodes are compact rounded chips. Measured off Rive's editor at 100%:
+// 36px tall, 8px radius, 10px inset, 12px icon, 4px gap, 11px label. A special
+// state (Any State, Exit, Entry) is a solid tinted chip with no border; an animation
+// or blend state is a #333333 chip with a subtle border.
+const NODE_H = 36;
+const NODE_ICON = 12;
+const NODE_GAP = 4;
+const NODE_PAD = 10;
+/** what a node is worth before any label */
+const NODE_CHROME = NODE_PAD + NODE_ICON + NODE_GAP + NODE_PAD;
+const NODE_MIN_W = 44;
+const NODE_MAX_W = 200;
+const EMPTY_HINT = 'Select an empty state to add';
+
+type StateKind = 'entry' | 'any' | 'exit' | 'animation' | 'blend';
+
+/** Sampled from Rive's editor: special states are solid tinted chips. */
+const STATE_TINTS: Record<StateKind, string> = {
+  entry: '#446154',
+  any: '#284c76',
+  exit: '#562f2f',
+  animation: '#333333',
+  blend: '#3d3550',
+};
+
+/** Entry, Any State and Exit are drawn differently from an animation state. */
+function stateKind(st: CoreObj): StateKind {
+  if (st.type === 'EntryState') return 'entry';
+  if (st.type === 'AnyState') return 'any';
+  if (st.type === 'ExitState') return 'exit';
+  const name = String(st.props.name ?? '');
+  const blend = isA(st.type, 'BlendState') || isA(st.type, 'BlendAnimation') || name.startsWith('Blend');
+  return blend ? 'blend' : 'animation';
+}
+
+/**
+ * A node label, measured with a canvas so the chip hugs its text exactly the way
+ * Rive's does. Falling back to a per-character estimate keeps this usable in
+ * tests and during server rendering, where no canvas exists.
+ */
+let measureCtx: CanvasRenderingContext2D | null | undefined;
+function labelWidth(text: string) {
+  const font = '11px "IBM Plex Sans", system-ui, sans-serif';
+  if (measureCtx === undefined) {
+    try {
+      measureCtx = typeof document === 'undefined' ? null : document.createElement('canvas').getContext('2d');
+    } catch {
+      measureCtx = null;
+    }
+  }
+  if (measureCtx) {
+    measureCtx.font = font;
+    return measureCtx.measureText(text).width;
+  }
+  return text.length * 5.7;
+}
+
+/** Half the visual footprint of a node, per state, in graph units. */
+function nodeSize(st: CoreObj, ab: ArtboardDoc) {
+  const text = stateLabel(ab, st);
+  const width = Math.max(NODE_MIN_W, Math.min(NODE_MAX_W, Math.round(labelWidth(text) + NODE_CHROME)));
+  return { width, height: NODE_H, cx: width / 2, cy: NODE_H / 2 };
+}
 
 function useSM() {
   const ab = useActiveArtboard();
@@ -56,11 +135,49 @@ function editSM(abId: string, smId: string, fn: (sm: CoreObj, ab: ArtboardDoc, d
 
 const PROPERTY_ICONS: Record<PropertyType, React.ReactNode> = {
   number: <Hash size={13} />,
+  enum: <Braces size={13} />,
   boolean: <ToggleLeft size={13} />,
   trigger: <Zap size={13} />,
   string: <Type size={13} />,
   color: <Palette size={13} />,
 };
+
+/**
+ * Re-types a state, keeping its id so transitions keep pointing at it — Rive
+ * lets you change a state between Single, 1D and Additive after creating it.
+ * Children that only make sense for the old type (blend animations) are dropped.
+ */
+const STATE_TYPES: Record<string, string> = {
+  single: 'AnimationState',
+  blend1d: 'BlendState1DInput',
+  blendDirect: 'BlendStateDirect',
+};
+
+function retypeState(state: CoreObj, kind: string, ab: ArtboardDoc): boolean {
+  const next = STATE_TYPES[kind];
+  if (!next || state.type === next) return false;
+  state.type = next;
+  if (next === 'AnimationState') {
+    if (state.props.inputId !== undefined) delete state.props.inputId;
+    if (state.props.animationId === undefined) {
+      const first = ab.animations[0];
+      if (first) state.props.animationId = first.id;
+    }
+    state.children = (state.children ?? []).filter((c) => !isA(c.type, 'BlendAnimation'));
+  } else if (next === 'BlendState1DInput') {
+    // 1D blends need at least one timeline entry to show anything
+    const keep = (state.children ?? []).filter((c) => isA(c.type, 'BlendAnimation'));
+    state.children = keep.length
+      ? keep
+      : ab.animations.slice(0, 1).map((a, i) => obj('BlendAnimation1D', { animationId: a.id, value: i * 100 }));
+  } else {
+    const keep = (state.children ?? []).filter((c) => isA(c.type, 'BlendAnimation'));
+    state.children = keep.length
+      ? keep
+      : ab.animations.slice(0, 2).map((a) => obj('BlendAnimationDirect', { animationId: a.id, mixValue: 100, blendSource: 0 }));
+  }
+  return true;
+}
 
 function stateLabel(ab: ArtboardDoc, st: CoreObj) {
   if (st.type === 'EntryState') return 'Entry';
@@ -75,12 +192,13 @@ function stateLabel(ab: ArtboardDoc, st: CoreObj) {
 }
 
 function defaultPos(st: CoreObj, i: number, states: CoreObj[]): { x: number; y: number } {
-  if (st.type === 'AnyState') return { x: 20, y: 20 };
-  if (st.type === 'EntryState') return { x: 20, y: 80 };
-  if (st.type === 'ExitState') return { x: 20, y: 140 };
-  // other states in a grid to the right, in layer order
+  // Rive's default layout: Any State and Exit stack in a column on the left, Entry
+  // sits just below them and feeds the first real state, and the rest flow right.
+  if (st.type === 'AnyState') return { x: 30, y: 52 };
+  if (st.type === 'ExitState') return { x: 30, y: 96 };
+  if (st.type === 'EntryState') return { x: 30, y: 150 };
   const k = states.filter((s, j) => j < i && !['AnyState', 'EntryState', 'ExitState'].includes(s.type)).length;
-  return { x: 200 + (k % 3) * 160, y: 20 + Math.floor(k / 3) * 60 };
+  return { x: 150 + (k % 3) * 150, y: 93 + Math.floor(k / 3) * 66 };
 }
 
 function usePreviewInputs() {
@@ -99,20 +217,66 @@ function usePreviewInputs() {
 }
 const EMPTY: never[] = [];
 
+/**
+ * A collapsed panel in Rive's state machine view is a thin vertical strip with a
+ * chevron, the label reading upward and a dot when the panel has entries. Clicking
+ * it unfurls the column; clicking again folds it away.
+ */
+function RailButton({
+  label,
+  open,
+  count,
+  onToggle,
+  icon,
+}: {
+  label: string;
+  open: boolean;
+  count: number;
+  onToggle: () => void;
+  icon: React.ReactNode;
+}) {
+  return (
+    <button
+      className={`w-[30px] shrink-0 flex flex-col items-center pt-2.5 gap-2 border-r border-line ${open ? 'bg-[#1e1e1e] text-t0' : 'bg-[#181818] text-t1 hover:text-t0'}`}
+      title={`${open ? 'Hide' : 'Show'} ${label.toLowerCase()} (${count})`}
+      aria-expanded={open}
+      onClick={onToggle}
+    >
+      <ChevronDown size={12} className={`transition-transform ${open ? 'rotate-90' : '-rotate-90'}`} />
+      <span className="[writing-mode:vertical-rl] text-[11px] tracking-wide">{label}</span>
+      {icon}
+      {count > 0 && !open && <span className="w-1.5 h-1.5 rounded-full bg-editor-accent" />}
+    </button>
+  );
+}
+
+/** The empty state's placeholder chip, from Rive's "Select an empty state to add". */
+function EmptyHint() {
+  return (
+    <div className="absolute inset-0 grid place-items-center pointer-events-none">
+      <span className="flex items-center gap-1.5 text-t3 text-[11px]">
+        <CornerDownRight size={11} /> {EMPTY_HINT}
+      </span>
+    </div>
+  );
+}
+
 export function StateMachineGraph() {
   const { ab, sm, layers, layer } = useSM();
   const previewing = useEditor((s) => s.previewing);
   const readOnly = useEditor((s) => s.readOnly);
   const smSelection = useEditor((s) => s.smSelection);
-  const [tab, setTab] = useState<'data' | 'listeners' | 'events'>('data');
+  const [panelOpen, setPanelOpen] = useState<'data' | 'listeners' | 'events' | null>('data');
   const [addMenu, setAddMenu] = useState<string | null>(null);
   const [linking, setLinking] = useState<{ from: string; x: number; y: number } | null>(null);
   const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1);
   const graphRef = useRef<HTMLDivElement>(null);
   const liveInputs = usePreviewInputs();
   const doc = useEditor((st) => st.doc);
   const s = useEditor.getState();
 
+  const togglePanel = (which: 'data' | 'listeners' | 'events') => setPanelOpen((open) => (open === which ? null : which));
   useEffect(() => {
     const close = () => setAddMenu(null);
     window.addEventListener('click', close);
@@ -256,7 +420,7 @@ export function StateMachineGraph() {
 
   const graphPoint = (e: { clientX: number; clientY: number }) => {
     const r = graphRef.current!.getBoundingClientRect();
-    return { x: e.clientX - r.left - pan.x, y: e.clientY - r.top - pan.y };
+    return { x: (e.clientX - r.left) / zoom - pan.x, y: (e.clientY - r.top) / zoom - pan.y };
   };
 
   const dragNode = (e: React.PointerEvent, st: CoreObj, i: number) => {
@@ -299,7 +463,8 @@ export function StateMachineGraph() {
       const q = graphPoint(ev);
       const target = states.find((t, i) => {
         const tp = posOf(t, i);
-        return q.x >= tp.x && q.x <= tp.x + NODE_W && q.y >= tp.y && q.y <= tp.y + NODE_H;
+        const size = nodeSize(t, ab);
+        return q.x >= tp.x && q.x <= tp.x + size.width && q.y >= tp.y && q.y <= tp.y + size.height;
       });
       if (!target || target.id === st.id || target.type === 'EntryState' || target.type === 'AnyState') return;
       const tr = obj('StateTransition', { stateToId: target.id }, []);
@@ -337,30 +502,28 @@ export function StateMachineGraph() {
       if (ti >= 0) edges.push({ tr, from: st, to: states[ti], fi, ti });
     }
   });
+  /** Node centre in graph units, using the measured chip width. */
   const center = (st: CoreObj, i: number) => {
     const p = posOf(st, i);
-    return { x: p.x + NODE_W / 2, y: p.y + NODE_H / 2 };
+    const size = nodeSize(st, ab);
+    return { x: p.x + size.cx, y: p.y + size.cy };
   };
   const togglePreview = () => {
     s.set('previewing', !previewing);
     s.set('playing', false);
   };
+  /** Graph zoom, matching Rive's percentage control in the state machine toolbar. */
+  const zoomBy = (factor: number) => setZoom((z) => Math.min(2.5, Math.max(0.2, Math.round(z * factor * 100) / 100)));
 
-  return (
-    <div className="flex-1 flex min-w-0">
-      {/* inputs & listeners */}
-      <div className="w-[230px] shrink-0 border-r border-line flex flex-col">
-        <TabStrip
-          items={[
-            { id: 'data', label: 'Data' },
-            { id: 'listeners', label: 'Listeners' },
-            { id: 'events', label: 'Events' },
-          ]}
-          value={tab}
-          onChange={setTab}
-        />
-        <div className="flex-1 overflow-auto p-1.5">
-          {tab === 'data' && (
+  // Rive's state machine view is a full-bleed canvas with the chrome floating on top
+  // of it: two icon rails on the left (Inputs, Listeners) that open as columns, a
+  // toolbar row over the canvas, and an empty-state hint in the middle. The graph
+  // itself is measured in graph units and drawn through one transform, so zooming
+  // keeps the line weights and corner radii crisp instead of scaling them.
+  const panelBody = () => (
+    <>
+
+          {panelOpen === 'data' && (
             <>
               {viewModel && (
                 <div className="px-2 py-2 mb-1 rounded bg-bg2">
@@ -491,7 +654,7 @@ export function StateMachineGraph() {
               )}
             </>
           )}
-          {tab === 'listeners' && (
+          {panelOpen === 'listeners' && (
             <>
               {listeners.map((l) => {
                 const sel = smSelection?.kind === 'listener' && smSelection.id === l.id;
@@ -516,7 +679,7 @@ export function StateMachineGraph() {
               <p className="text-t3 text-[11px] mt-2 px-1">Listeners react to pointer events on a target shape and set properties (or inputs). Try them in Preview.</p>
             </>
           )}
-          {tab === 'events' && (
+          {panelOpen === 'events' && (
             <div className="flex flex-col gap-2">
               <p className="text-t3 text-[11px] px-1">Named events can be fired by listeners and reported by the Rive runtime.</p>
               {events.map((event) => (
@@ -552,44 +715,98 @@ export function StateMachineGraph() {
               {!events.length && <div className="text-t3 text-[11px] text-center py-3">No events yet</div>}
             </div>
           )}
-        </div>
+    </>
+  );
+
+  return (
+    <div className="flex-1 flex min-w-0 relative bg-[#181818]">
+      {/* icon rails: unfurl a column when clicked, exactly like Rive's Inputs/Listeners */}
+      <div className="flex shrink-0 z-20">
+        <RailButton
+          label="Inputs"
+          icon={<Braces size={11} className={panelOpen === 'data' ? 'text-editor-accent' : 'text-t3'} />}
+          open={panelOpen === 'data'}
+          count={props.length}
+          onToggle={() => togglePanel('data')}
+        />
+        <RailButton
+          label="Listeners"
+          icon={<MousePointerClick size={11} className={panelOpen === 'listeners' ? 'text-editor-accent' : 'text-t3'} />}
+          open={panelOpen === 'listeners'}
+          count={listeners.length}
+          onToggle={() => togglePanel('listeners')}
+        />
       </div>
 
-      {/* graph */}
-      <div className="flex-1 flex flex-col min-w-0">
-        <div className="h-8 flex items-center gap-1 px-2 border-b border-line shrink-0">
-          {layers.map((l) => (
-            <button
-              key={l.id}
-              className={`px-2.5 h-6 rounded ${l.id === layer?.id ? 'bg-bg3 text-t0' : 'text-t2 hover:text-t0'}`}
-              onClick={() => s.set('layerId', l.id)}
-              onDoubleClick={async () => {
-                if (readOnly) return;
-                const name = await promptDialog({ title: 'Rename layer', label: 'Layer name', defaultValue: String(l.props.name ?? ''), confirmLabel: 'Rename' });
-                if (name) editSM(ab.id, sm.id, (m) => void (m.children!.find((c) => c.id === l.id)!.props.name = name));
-              }}
-            >
-              {String(l.props.name || 'Layer')}
-            </button>
-          ))}
-          {!readOnly && (
-            <button className="icon-btn" onClick={addLayer} title="Add layer">
-              <Plus size={13} />
-            </button>
-          )}
-          {layers.length > 1 && layer && !readOnly && (
-            <button
-              className="icon-btn"
-              title="Delete layer"
-              onClick={() => {
-                editSM(ab.id, sm.id, (m) => void (m.children = m.children!.filter((c) => c.id !== layer.id)));
-                s.set('layerId', null);
-              }}
-            >
-              <Trash2 size={13} />
-            </button>
-          )}
+      {panelOpen && (
+        <div className="w-[218px] shrink-0 border-r border-line bg-[#191919] flex flex-col z-10">
+          <TabStrip
+            className="border-b border-line shrink-0"
+            items={[
+              { id: 'data', label: 'Inputs' },
+              { id: 'listeners', label: 'Listeners' },
+              { id: 'events', label: 'Events' },
+            ]}
+            value={panelOpen}
+            onChange={(next) => setPanelOpen(next)}
+          />
+          <div className="flex-1 overflow-auto p-1.5">{panelBody()}</div>
+        </div>
+      )}
+
+      <div className="flex-1 flex flex-col min-w-0 relative">
+        {/* toolbar over the canvas */}
+        <div className="absolute inset-x-0 top-0 h-[34px] z-10 flex items-center gap-1 px-2.5">
+          <button
+            className="icon-btn w-6 h-6"
+            title={previewing ? 'Stop preview' : 'Play the state machine (Preview)'}
+            onClick={togglePreview}
+          >
+            {previewing ? <Square size={11} /> : <Play size={12} />}
+          </button>
+          <button
+            className="flex items-center gap-0.5 h-6 px-1.5 rounded text-t1 text-[11px] hover:bg-bg3 tabular-nums"
+            title="Zoom. Click to reset to 100%."
+            onClick={() => setZoom(1)}
+          >
+            <ChevronDown size={10} />
+            {Math.round(zoom * 100)}%
+          </button>
           <div className="flex-1" />
+          <div className="flex items-center h-[26px] rounded-md bg-[#202020] border border-[#2b2b2b] overflow-hidden">
+            {layers.map((l) => (
+              <button
+                key={l.id}
+                className={`px-2.5 h-full text-[11px] ${l.id === layer?.id ? 'bg-[#2f2f2f] text-t0' : 'text-t2 hover:text-t0'}`}
+                onClick={() => s.set('layerId', l.id)}
+                onDoubleClick={async () => {
+                  if (readOnly) return;
+                  const name = await promptDialog({ title: 'Rename layer', label: 'Layer name', defaultValue: String(l.props.name ?? ''), confirmLabel: 'Rename' });
+                  if (name) editSM(ab.id, sm.id, (m) => void (m.children!.find((c) => c.id === l.id)!.props.name = name));
+                }}
+                title={readOnly ? String(l.props.name ?? 'Layer') : 'Double-click to rename'}
+              >
+                {String(l.props.name || 'Layer')}
+              </button>
+            ))}
+            {!readOnly && (
+              <button className="w-6 h-full grid place-items-center text-t2 hover:text-t0 hover:bg-bg3" onClick={addLayer} title="Add layer">
+                <Plus size={12} />
+              </button>
+            )}
+            {layers.length > 1 && layer && !readOnly && (
+              <button
+                className="w-6 h-full grid place-items-center text-t2 hover:text-danger hover:bg-bg3"
+                title="Delete layer"
+                onClick={() => {
+                  editSM(ab.id, sm.id, (m) => void (m.children = m.children!.filter((c) => c.id !== layer.id)));
+                  s.set('layerId', null);
+                }}
+              >
+                <Trash2 size={11} />
+              </button>
+            )}
+          </div>
           {!readOnly && (
             <div className="relative">
               <button
@@ -598,8 +815,9 @@ export function StateMachineGraph() {
                   e.stopPropagation();
                   setAddMenu(addMenu === 'state' ? null : 'state');
                 }}
+                title="Add a state"
               >
-                <Plus size={13} /> Add state
+                <Plus size={12} /> State
               </button>
               {addMenu === 'state' && (
                 <div className="menu absolute right-0 top-7 max-h-64 overflow-auto">
@@ -619,20 +837,23 @@ export function StateMachineGraph() {
               )}
             </div>
           )}
-          <button className={`btn h-6 px-2 ${previewing ? 'btn-primary' : ''}`} onClick={togglePreview} title="Run the state machine on the stage">
-            {previewing ? <Square size={12} /> : <Play size={12} />} {previewing ? 'Stop' : 'Preview'}
-          </button>
         </div>
+
         <div
           ref={graphRef}
           className="flex-1 relative overflow-hidden"
           style={{
-            backgroundColor: '#161616',
-            backgroundImage: 'radial-gradient(#2a2a2a 1px, transparent 1px)',
-            backgroundSize: '16px 16px',
-            backgroundPosition: `${pan.x}px ${pan.y}px`,
+            backgroundColor: '#181818',
+            backgroundImage: 'radial-gradient(#262626 1px, transparent 1px)',
+            backgroundSize: `${16 * zoom}px ${16 * zoom}px`,
+            backgroundPosition: `${pan.x * zoom}px ${pan.y * zoom}px`,
           }}
           onPointerDown={panGraph}
+          onWheel={(e) => {
+            if (!e.ctrlKey && !e.metaKey) return;
+            e.preventDefault();
+            zoomBy(e.deltaY < 0 ? 1.1 : 1 / 1.1);
+          }}
           onDragOver={(e) => e.preventDefault()}
           onContextMenu={(e) => {
             if ((e.target as Element).closest('[data-state-node]')) return;
@@ -642,43 +863,44 @@ export function StateMachineGraph() {
                 label: 'Add state',
                 disabled: readOnly,
                 submenu: [
-                  ...ab.animations.map((a): MenuItem => ({ label: String(a.props.name ?? 'Timeline'), run: () => addState(a.id, { x: at.x - NODE_W / 2, y: at.y - NODE_H / 2 }) })),
+                  ...ab.animations.map((a): MenuItem => ({ label: String(a.props.name ?? 'Timeline'), run: () => addState(a.id, { x: at.x - 60, y: at.y - NODE_H / 2 }) })),
                   sep,
-                  { label: 'Empty state', run: () => addState(null, { x: at.x - NODE_W / 2, y: at.y - NODE_H / 2 }) },
+                  { label: 'Empty state', run: () => addState(null, { x: at.x - 60, y: at.y - NODE_H / 2 }) },
                 ],
               },
               { label: 'Add layer', disabled: readOnly, run: addLayer },
               sep,
               { label: previewing ? 'Stop preview' : 'Preview', run: togglePreview },
-              { label: 'Reset view', run: () => setPan({ x: 0, y: 0 }) },
+              { label: 'Reset view', run: () => (setPan({ x: 0, y: 0 }), setZoom(1)) },
             ]);
           }}
         >
           <svg data-bg className="absolute inset-0 w-full h-full" onPointerDown={panGraph}>
             <defs>
-              <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-                <path d="M0 0 10 5 0 10z" fill="#8a8a8a" />
+              <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M0 0 10 5 0 10z" fill="#7d7d7d" />
               </marker>
-              <marker id="arrow-sel" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <marker id="arrow-sel" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
                 <path d="M0 0 10 5 0 10z" fill="#57a5e0" />
               </marker>
             </defs>
-            <g transform={`translate(${pan.x} ${pan.y})`}>
+            <g transform={`translate(${pan.x * zoom} ${pan.y * zoom}) scale(${zoom})`}>
               {edges.map(({ tr, from, to, fi, ti }) => {
                 const a = center(from, fi);
                 const b = center(to, ti);
-                const sel0 = smSelection?.kind === 'transition' && smSelection.id === tr.id;
+                const sizeA = nodeSize(from, ab);
+                const sel = smSelection?.kind === 'transition' && smSelection.id === tr.id;
                 if (Math.hypot(b.x - a.x, b.y - a.y) < 1) {
-                  // self transition (or overlapping states): draw a loop above the node
-                  const top = a.y - NODE_H / 2;
+                  // self transition: Rive draws a small hook off the node's bottom-right
+                  const top = a.y - sizeA.cy;
                   return (
                     <path
                       key={tr.id}
-                      d={`M${a.x - 12} ${top} C${a.x - 24} ${top - 28} ${a.x + 24} ${top - 28} ${a.x + 12} ${top}`}
+                      d={`M${a.x - 10} ${top} C${a.x - 22} ${top - 26} ${a.x + 22} ${top - 26} ${a.x + 10} ${top}`}
                       fill="none"
-                      stroke={sel0 ? '#57a5e0' : '#8a8a8a'}
-                      strokeWidth={sel0 ? 2 : 1.5}
-                      markerEnd={`url(#${sel0 ? 'arrow-sel' : 'arrow'})`}
+                      stroke={sel ? '#57a5e0' : '#7d7d7d'}
+                      strokeWidth={sel ? 1.75 : 1.25}
+                      markerEnd={`url(#${sel ? 'arrow-sel' : 'arrow'})`}
                       style={{ cursor: 'pointer' }}
                       onPointerDown={(e) => {
                         e.stopPropagation();
@@ -693,17 +915,17 @@ export function StateMachineGraph() {
                 const len = Math.hypot(dx, dy) || 1;
                 const nx = -dy / len;
                 const ny = dx / len;
-                const off = twoWay ? 6 : 0;
-                // clip line at node rectangles
-                const clip = (p: { x: number; y: number }, dir: number) => {
-                  const tx = Math.abs(dx) > 1e-6 ? NODE_W / 2 / Math.abs(dx) : Infinity;
-                  const ty = Math.abs(dy) > 1e-6 ? NODE_H / 2 / Math.abs(dy) : Infinity;
+                const off = twoWay ? 5 : 0;
+                const sizeB = nodeSize(to, ab);
+                // clip the line at the node rectangles
+                const clip = (p: { x: number; y: number }, cx: number, cy: number, dir: number) => {
+                  const tx = Math.abs(dx) > 1e-6 ? cx / Math.abs(dx) : Infinity;
+                  const ty = Math.abs(dy) > 1e-6 ? cy / Math.abs(dy) : Infinity;
                   const t = Math.min(tx, ty);
                   return { x: p.x + dx * t * dir, y: p.y + dy * t * dir };
                 };
-                const p1 = clip(a, 1);
-                const p2 = clip(b, -1);
-                const sel = smSelection?.kind === 'transition' && smSelection.id === tr.id;
+                const p1 = clip(a, sizeA.cx, sizeA.cy, 1);
+                const p2 = clip(b, sizeB.cx, sizeB.cy, -1);
                 const hasConditions = (tr.children ?? []).length > 0;
                 return (
                   <g
@@ -721,11 +943,11 @@ export function StateMachineGraph() {
                           disabled: readOnly,
                           run: () =>
                             editSM(ab.id, sm.id, (m) => {
-                              const w = (o: CoreObj) => {
+                              const walk = (o: CoreObj) => {
                                 if (o.id === tr.id) o.props.flags = prop(o, 'flags') ^ 1;
-                                o.children?.forEach(w);
+                                o.children?.forEach(walk);
                               };
-                              w(m);
+                              walk(m);
                             }),
                         },
                         sep,
@@ -734,19 +956,29 @@ export function StateMachineGraph() {
                     }}
                     style={{ cursor: 'pointer' }}
                   >
-                    <line x1={p1.x + nx * off} y1={p1.y + ny * off} x2={p2.x + nx * off} y2={p2.y + ny * off} stroke="transparent" strokeWidth={10} />
+                    <line x1={p1.x + nx * off} y1={p1.y + ny * off} x2={p2.x + nx * off} y2={p2.y + ny * off} stroke="transparent" strokeWidth={9} />
                     <line
                       x1={p1.x + nx * off}
                       y1={p1.y + ny * off}
                       x2={p2.x + nx * off}
                       y2={p2.y + ny * off}
-                      stroke={sel ? '#57a5e0' : '#8a8a8a'}
-                      strokeWidth={sel ? 2 : 1.5}
+                      stroke={sel ? '#57a5e0' : '#7d7d7d'}
+                      strokeWidth={sel ? 1.75 : 1.25}
                       strokeDasharray={prop(tr, 'flags') & 1 ? '4 3' : undefined}
                       markerEnd={`url(#${sel ? 'arrow-sel' : 'arrow'})`}
                     />
+                    {/* Rive's "this transition has conditions/actions" badge */}
                     {hasConditions && (
-                      <circle cx={(p1.x + p2.x) / 2 + nx * off} cy={(p1.y + p2.y) / 2 + ny * off} r={3} fill={sel ? '#57a5e0' : '#ffcf33'} />
+                      <rect
+                        x={(p1.x + p2.x) / 2 + nx * off - 5}
+                        y={(p1.y + p2.y) / 2 + ny * off - 4}
+                        width={10}
+                        height={8}
+                        rx={2}
+                        fill="#141414"
+                        stroke={sel ? '#57a5e0' : '#8a8a8a'}
+                        strokeWidth={1}
+                      />
                     )}
                   </g>
                 );
@@ -755,78 +987,106 @@ export function StateMachineGraph() {
                 (() => {
                   const fi = states.findIndex((t) => t.id === linking.from);
                   const a = center(states[fi], fi);
-                  return <line x1={a.x} y1={a.y} x2={linking.x} y2={linking.y} stroke="#57a5e0" strokeWidth={1.5} markerEnd="url(#arrow-sel)" />;
+                  return <line x1={a.x} y1={a.y} x2={linking.x} y2={linking.y} stroke="#57a5e0" strokeWidth={1.25} markerEnd="url(#arrow-sel)" />;
                 })()}
             </g>
           </svg>
-          {states.map((st, i) => {
-            const p = posOf(st, i);
-            const sel = smSelection?.kind === 'state' && smSelection.id === st.id;
-            const special = st.type !== 'AnimationState';
-            const color =
-              st.type === 'EntryState' ? '#27c498' : st.type === 'AnyState' ? '#57a5e0' : st.type === 'ExitState' ? '#ff5c5c' : '#3a3a3a';
-            return (
-              <div
-                key={st.id}
-                data-state-node
-                className="absolute group rounded-md flex items-center px-3 text-[12px] select-none"
-                style={{
-                  left: p.x + pan.x,
-                  top: p.y + pan.y,
-                  width: NODE_W,
-                  height: NODE_H,
-                  background: special ? '#232323' : '#2c2c2c',
-                  border: `1.5px solid ${sel ? '#57a5e0' : color}`,
-                  cursor: 'grab',
-                }}
-                onPointerDown={(e) => e.button === 0 && dragNode(e, st, i)}
-                onContextMenu={(e) => {
-                  s.set('smSelection', { kind: 'state', id: st.id });
-                  const special = ['EntryState', 'AnyState', 'ExitState'].includes(st.type);
-                  openContextMenu(e, [
-                    ...(st.type === 'AnimationState'
-                      ? [
-                          {
-                            label: 'Timeline',
-                            submenu: ab.animations.map(
-                              (a): MenuItem => ({
-                                label: String(a.props.name ?? 'Timeline'),
-                                checked: st.props.animationId === a.id,
-                                disabled: readOnly,
-                                run: () =>
-                                  editSM(ab.id, sm.id, (m) => {
-                                    const w = (o: CoreObj) => {
-                                      if (o.id === st.id) o.props.animationId = a.id;
-                                      o.children?.forEach(w);
-                                    };
-                                    w(m);
-                                  }),
-                              }),
-                            ),
-                          } as MenuItem,
-                          sep,
-                        ]
-                      : []),
-                    { label: 'Delete state', danger: true, disabled: readOnly || special, run: () => deleteSmSelection() },
-                  ]);
-                }}
-              >
-                <span className="truncate flex-1" style={{ color: special ? color : '#eee' }}>
-                  {stateLabel(ab, st)}
-                </span>
-                {!readOnly && st.type !== 'ExitState' && (
-                  <div
-                    className="absolute -right-2 top-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-editor-accent border-2 border-bg1 opacity-0 group-hover:opacity-100 cursor-crosshair"
-                    title="Drag to another state to add a transition"
-                    onPointerDown={(e) => startLink(e, st)}
-                  />
-                )}
-              </div>
-            );
-          })}
-          <div className="absolute left-2 bottom-2 text-t3 text-[11px] pointer-events-none">
-            Drag the blue dot on a state to create a transition. Drag empty space to pan.
+
+          <div
+            className="absolute inset-0"
+            style={{ transform: `translate(${pan.x * zoom}px, ${pan.y * zoom}px) scale(${zoom})`, transformOrigin: '0 0' }}
+          >
+            {states.map((st, i) => {
+              const p = posOf(st, i);
+              const size = nodeSize(st, ab);
+              const sel = smSelection?.kind === 'state' && smSelection.id === st.id;
+              const kind = stateKind(st);
+              const label = stateLabel(ab, st);
+              return (
+                <div
+                  key={st.id}
+                  data-state-node
+                  className="absolute group flex items-center select-none"
+                  style={{
+                    left: p.x,
+                    top: p.y,
+                    width: size.width,
+                    height: NODE_H,
+                    paddingLeft: NODE_PAD,
+                    paddingRight: NODE_PAD,
+                    gap: NODE_GAP,
+                    borderRadius: 8,
+                    background: STATE_TINTS[kind],
+                    border: `1px solid ${sel ? '#57a5e0' : kind === 'animation' || kind === 'blend' ? '#3b3b3b' : 'transparent'}`,
+                    boxShadow: sel ? '0 0 0 1px #57a5e0' : undefined,
+                    cursor: 'grab',
+                  }}
+                  onPointerDown={(e) => e.button === 0 && dragNode(e, st, i)}
+                  onContextMenu={(e) => {
+                    s.set('smSelection', { kind: 'state', id: st.id });
+                    const special = ['EntryState', 'AnyState', 'ExitState'].includes(st.type);
+                    openContextMenu(e, [
+                      ...(st.type === 'AnimationState'
+                        ? [
+                            {
+                              label: 'Timeline',
+                              submenu: ab.animations.map(
+                                (a): MenuItem => ({
+                                  label: String(a.props.name ?? 'Timeline'),
+                                  checked: st.props.animationId === a.id,
+                                  disabled: readOnly,
+                                  run: () =>
+                                    editSM(ab.id, sm.id, (m) => {
+                                      const walk = (o: CoreObj) => {
+                                        if (o.id === st.id) o.props.animationId = a.id;
+                                        o.children?.forEach(walk);
+                                      };
+                                      walk(m);
+                                    }),
+                                }),
+                              ),
+                            } as MenuItem,
+                            sep,
+                          ]
+                        : []),
+                      { label: 'Delete state', danger: true, disabled: readOnly || special, run: () => deleteSmSelection() },
+                    ]);
+                  }}
+                >
+                  <span className="shrink-0 grid place-items-center" style={{ width: NODE_ICON, color: '#c9c9c9' }}>
+                    {kind === 'any' ? (
+                      <Asterisk size={12} strokeWidth={2.2} />
+                    ) : kind === 'blend' ? (
+                      <Layers size={11} strokeWidth={2} />
+                    ) : (
+                      <ArrowRight size={11} strokeWidth={2} />
+                    )}
+                  </span>
+                  <span
+                    className="truncate"
+                    style={{
+                      fontSize: 11,
+                      lineHeight: '13px',
+                      letterSpacing: 0.1,
+                      color: '#e6e6e6',
+                    }}
+                  >
+                    {label}
+                  </span>
+                  {sel && <span className="ml-0.5 shrink-0 text-[9px] text-[#7fb2e0]">✓</span>}
+                  {!readOnly && st.type !== 'ExitState' && (
+                    <div
+                      className="absolute -right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-editor-accent border border-[#141414] opacity-0 group-hover:opacity-100 cursor-crosshair"
+                      title="Drag to another state to add a transition"
+                      onPointerDown={(e) => startLink(e, st)}
+                    />
+                  )}
+                </div>
+              );
+            })}
           </div>
+
+          {!states.length && <EmptyHint />}
         </div>
       </div>
     </div>
@@ -888,6 +1148,7 @@ export function StateMachineInspector() {
       };
       w(m);
     }, transient);
+  const convertStateType = (kind: string) => mutate((state) => void retypeState(state, kind, ab));
   const mutate = (fn: (o: CoreObj) => void) =>
     s.commit((d) => {
       const a = findArtboard(d, ab.id)!;
@@ -937,6 +1198,21 @@ export function StateMachineInspector() {
     return (
       <div className="section flex flex-col gap-2">
         {header(stateLabel(ab, t))}
+        {/* Rive's Type switch: a state can be re-typed in the Inspector, keeping its transitions */}
+        {!(t.type === 'EntryState' || t.type === 'AnyState' || t.type === 'ExitState') && (
+          <Row label="Type">
+            <Select
+              value={t.type === 'AnimationState' ? 'single' : t.type === 'BlendState1DInput' ? 'blend1d' : 'blendDirect'}
+              options={[
+                { value: 'single', label: 'Single' },
+                { value: 'blend1d', label: '1D blend' },
+                { value: 'blendDirect', label: 'Additive blend' },
+              ]}
+              disabled={readOnly}
+              onChange={(kind) => convertStateType(kind)}
+            />
+          </Row>
+        )}
         {t.type === 'AnimationState' && (
           <>
             <Row label="Timeline">
@@ -999,12 +1275,35 @@ export function StateMachineInspector() {
         {transitions.length === 0 && <div className="text-t3">None. Drag from the blue dot on the state.</div>}
         {transitions.map((tr) => {
           const to = layer?.children?.find((c) => c.id === tr.props.stateToId);
+          const weight = prop(tr, 'randomWeight') || 1;
           return (
-            <button key={tr.id} className="text-left px-2 py-1 rounded bg-bg2 hover:bg-bg3" onClick={() => s.set('smSelection', { kind: 'transition', id: tr.id })}>
-              → {to ? stateLabel(ab, to) : '?'} {(tr.children ?? []).length ? `(${tr.children!.length} conditions)` : ''}
-            </button>
+            <div key={tr.id} className="flex items-center gap-1">
+              <button className="text-left flex-1 min-w-0 px-2 py-1 rounded bg-bg2 hover:bg-bg3 truncate" onClick={() => s.set('smSelection', { kind: 'transition', id: tr.id })}>
+                → {to ? stateLabel(ab, to) : '?'} {(tr.children ?? []).length ? `(${tr.children!.length} conditions)` : ''}
+              </button>
+              {/* Rive's Randomize Exit weights: a path with weight 3 is three times as likely to be taken */}
+              <div className="w-12 shrink-0" title="Randomize-exit weight (relative chance this path is chosen)">
+                <NumberField
+                  value={weight}
+                  precision={0}
+                  min={1}
+                  disabled={readOnly}
+                  onChange={(v, tr2) => {
+                    const next = Math.max(1, Math.round(v));
+                    mutate((state) => {
+                      const item = state.children?.find((child) => child.id === tr.id);
+                      if (item) item.props.randomWeight = next;
+                    });
+                    void tr2;
+                  }}
+                />
+              </div>
+            </div>
           );
         })}
+        <p className="text-t3 text-[10px] leading-relaxed mt-1">
+          Weights only apply when the layer randomizes its exit; higher numbers make a path more likely.
+        </p>
       </div>
     );
   }
@@ -1064,10 +1363,10 @@ export function StateMachineInspector() {
           />
         </Row>
         <label className="flex items-center gap-2 text-t1">
-          <input type="checkbox" checked={!!(flags & 16)} disabled={readOnly} onChange={(e) => setFlag(16, e.target.checked)} /> Pause when exiting
+          <input type="checkbox" checked={!!(flags & 16)} disabled={readOnly} onChange={(e) => setFlag(16, e.target.checked)} /> Pause source when exiting
         </label>
         <label className="flex items-center gap-2 text-t1">
-          <input type="checkbox" checked={!!(flags & 32)} disabled={readOnly} onChange={(e) => setFlag(32, e.target.checked)} /> Enable early exit
+          <input type="checkbox" checked={!!(flags & 32)} disabled={readOnly} onChange={(e) => setFlag(32, e.target.checked)} /> Allow exit during transition
         </label>
         <label className="flex items-center gap-2 text-t1">
           <input type="checkbox" checked={!!(flags & 1)} disabled={readOnly} onChange={(e) => setFlag(1, e.target.checked)} /> Disabled

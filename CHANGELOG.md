@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+### Data panel
+
+- Add a **Data** panel to the sidebar (third tab, matching Rive's sidebar order), with Properties and **Data table** views: the table shows one row per view model property and one column per view model instance, so sample data can be filled in before previewing.
+- Read view model **instances** from the file (values are stored positionally after their instance) and expose them through `instances()` / `previewInstance()` / `renameInstance()` in `@openrive/rive/databind`.
+- Add **Enum** view model properties: a `DataEnumCustom` holds the options, an enum property references it, and instances store the chosen key. Enum options survive a byte-identical round trip, and transition conditions compare option keys. Enum properties work in the MCP API and the state machine inspector too.
+
+### Stage
+
+- Keep the selection overlay and snap guides measuring the current document instead of the one captured when the drag began, so overlays stay attached to objects during a drag.
+- Keep hover feedback live while panning or dragging, and add **Alt+click select behind** to cycle through the objects stacked under the pointer (Rive's "select behind").
+- Add **Enter** to step into a group (Escape already stepped back out, as in Rive).
+- Editor shortcuts no longer fire while typing in a field, and an unavailable command no longer swallows its key.
+
+### State machine
+
+- Rebuild the state-machine view to match Rive's editor: a full-bleed canvas with the **Inputs** and **Listeners** rails floating on the left (click a rail to unfurl that column), the layer tabs, zoom percentage and Add state controls in a toolbar over the canvas, and an "Select an empty state to add" hint when the layer is empty.
+- Draw states as Rive does: compact chips sized to their text, tinted solid for **Any State**, **Exit** and **Entry**, neutral with a hairline border for animations and blends, with per-kind glyphs and a check on the state being edited. Zooming keeps line weights and radii crisp instead of scaling them.
+- Add **Ctrl/Cmd + scroll** zoom on the graph, and keep pan, drag, link-dragging and hit-testing consistent at any zoom.
+- Turn the timeline's **Animations** list into Rive's single flat column: no section headers, an arrow per timeline and a glyph per state machine, the default entry in bold, a check on the active one, and "Set as default" in the context menu.
+- Add Rive's **Randomize exit** weights on each outgoing transition, and let a state's **Type** be changed between Single, 1D blend and Additive blend after it is created.
+- Align transition option labels with Rive ("Pause source when exiting", "Allow exit during transition").
+
+### Docs
+
+- Correct the MCP tool count (50, not 42) in the README and the architecture guide.
+
 ## 0.2.13 - 2026-11-18
 
 ### Security

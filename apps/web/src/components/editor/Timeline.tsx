@@ -4,7 +4,7 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
-  Film,
+  FolderPlus,
   Pause,
   Play,
   Plus,
@@ -30,6 +30,7 @@ import {
 } from '@openrive/rive/ops';
 import { prop } from '@openrive/rive/scene';
 import { animationFrames, useActiveArtboard, useEditor } from '@/lib/store/editor';
+import { toast } from '@/lib/client/toast';
 import { NumberField, Select } from './controls';
 import { act, MenuItem, openContextMenu, sep } from './ContextMenu';
 import { runAction } from './actions';
@@ -103,8 +104,6 @@ function AnimationList({ ab }: { ab: ArtboardDoc }) {
   const stateMachineId = useEditor((s) => s.stateMachineId);
   const readOnly = useEditor((s) => s.readOnly);
   const [renaming, setRenaming] = useState<string | null>(null);
-  const [showTimelines, setShowTimelines] = useState(true);
-  const [showSMs, setShowSMs] = useState(true);
   const s = useEditor.getState();
 
   const uniqueName = (base: string, list: CoreObj[]) => {
@@ -135,6 +134,14 @@ function AnimationList({ ab }: { ab: ArtboardDoc }) {
       const t = a.animations.find((x) => x.id === id) ?? a.stateMachines.find((x) => x.id === id);
       if (t) t.props.name = name.trim();
     });
+  };
+  const setDefault = (o: CoreObj, isSM: boolean) => {
+    s.commit((d) => {
+      const a = findArtboard(d, ab.id)!;
+      if (isSM) a.artboard.props.defaultStateMachineId = o.id;
+      else a.artboard.props.defaultAnimationId = o.id;
+    });
+    toast(`${String(o.props.name ?? '')} is the default ${isSM ? 'state machine' : 'timeline'}`);
   };
   const remove = (id: string) => {
     s.commit((d) => {
@@ -167,12 +174,17 @@ function AnimationList({ ab }: { ab: ArtboardDoc }) {
     });
   };
 
+  // Rive's Animations list is one flat column with no section headers: timelines and
+  // state machines side by side, an arrow for a timeline, a small glyph for a state
+  // machine, the default entry in bold, and the add button in the header.
   const item = (o: CoreObj, isSM: boolean) => {
     const active = isSM ? stateMachineId === o.id : !stateMachineId && animationId === o.id;
+    const label = String(o.props.name || (isSM ? 'State Machine' : 'Timeline'));
+    const isDefault = isSM ? ab.artboard.props.defaultStateMachineId === o.id : ab.artboard.props.defaultAnimationId === o.id;
     return (
       <div
         key={o.id}
-        className={`flex items-center gap-2 h-7 px-3 cursor-default ${active ? 'bg-[#2a4a66]' : 'hover:bg-bg2'}`}
+        className={`flex items-center gap-2 h-[26px] pl-1.5 pr-2 mx-1 rounded cursor-default ${active ? 'bg-[#2e2e2e]' : 'hover:bg-bg2'}`}
         onClick={() => (isSM ? s.setStateMachine(o.id) : s.setAnimation(o.id))}
         onDoubleClick={() => !readOnly && setRenaming(o.id)}
         onContextMenu={(e) =>
@@ -181,17 +193,18 @@ function AnimationList({ ab }: { ab: ArtboardDoc }) {
             sep,
             { label: 'Rename', disabled: readOnly, run: () => setRenaming(o.id) },
             { label: 'Duplicate', icon: <Copy size={12} />, disabled: readOnly, run: () => duplicate(o.id) },
+            { label: 'Set as default', disabled: readOnly, run: () => setDefault(o, isSM) },
             sep,
             { label: 'Delete', icon: <Trash2 size={12} />, danger: true, disabled: readOnly, run: () => remove(o.id) },
           ])
         }
       >
-        <span className={isSM ? 'text-editor-accent' : 'text-anim'}>{isSM ? <Workflow size={13} /> : <Film size={13} />}</span>
+        <span className={isSM ? 'text-t2' : 'text-t2'}>{isSM ? <Workflow size={12} /> : <ArrowRightLeft size={12} className="opacity-70" />}</span>
         {renaming === o.id ? (
           <input
             autoFocus
             className="field h-5"
-            defaultValue={String(o.props.name ?? '')}
+            defaultValue={label}
             onBlur={(e) => rename(o.id, e.target.value)}
             onKeyDown={(e) => {
               e.stopPropagation();
@@ -200,32 +213,31 @@ function AnimationList({ ab }: { ab: ArtboardDoc }) {
             }}
           />
         ) : (
-          <span className="truncate flex-1">{String(o.props.name || (isSM ? 'State Machine' : 'Timeline'))}</span>
+          <span className={`truncate flex-1 text-[12px] ${isDefault || active ? 'font-semibold text-t0' : 'text-t1'}`}>{label}</span>
         )}
+        {active && <span className="text-t2 text-[10px] shrink-0">✓</span>}
       </div>
     );
   };
 
   return (
-    <div className="w-[220px] shrink-0 border-r border-line flex flex-col overflow-auto">
-      <div className="flex items-center h-8 px-2 border-b border-line">
-        <button className="flex items-center gap-1 flex-1 panel-title" onClick={() => setShowTimelines(!showTimelines)}>
-          {showTimelines ? <ChevronDown size={12} /> : <ChevronRight size={12} />} Timelines
+    <div className="w-[190px] shrink-0 border-r border-line flex flex-col overflow-auto">
+      <div className="flex items-center h-8 pl-2 pr-1.5 shrink-0">
+        <span className="flex-1 panel-title text-t1">Animations</span>
+        <button className="icon-btn w-6 h-6" disabled={readOnly} onClick={addSM} title="New state machine">
+          <FolderPlus size={13} />
         </button>
-        <button className="icon-btn" disabled={readOnly} onClick={addTimeline} title="New timeline">
-          <Plus size={14} />
-        </button>
-      </div>
-      {showTimelines && ab.animations.map((a) => item(a, false))}
-      <div className="flex items-center h-8 px-2 border-y border-line mt-1">
-        <button className="flex items-center gap-1 flex-1 panel-title" onClick={() => setShowSMs(!showSMs)}>
-          {showSMs ? <ChevronDown size={12} /> : <ChevronRight size={12} />} State Machines
-        </button>
-        <button className="icon-btn" disabled={readOnly} onClick={addSM} title="New state machine">
-          <Plus size={14} />
+        <button className="icon-btn w-6 h-6" disabled={readOnly} onClick={addTimeline} title="New timeline">
+          <Plus size={13} />
         </button>
       </div>
-      {showSMs && ab.stateMachines.map((m) => item(m, true))}
+      <div className="flex flex-col gap-px pb-2">
+        {ab.animations.map((a) => item(a, false))}
+        {ab.stateMachines.map((m) => item(m, true))}
+      </div>
+      {!ab.animations.length && !ab.stateMachines.length && (
+        <p className="text-t3 text-[11px] px-2.5 leading-relaxed">Timelines animate objects; a state machine plays timelines in response to input.</p>
+      )}
     </div>
   );
 }

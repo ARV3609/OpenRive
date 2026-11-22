@@ -17,22 +17,38 @@ Properties do everything inputs did, plus strings and colors, and no runtime war
 
 | | State machine input | Data binding property |
 | --- | --- | --- |
-| Types | number, boolean, trigger | number, boolean, trigger, **string**, **color** |
+| Types | number, boolean, trigger | number, boolean, trigger, **string**, **color**, **enum** |
 | Scope | one state machine | the whole artboard |
 | Runtime API | `rive.stateMachineInputs(…)` (deprecated) | `rive.viewModelInstance` |
 | Drives | transitions | transitions, and anything else bound to the property |
 
 ## Properties in the editor
 
-The **Data** tab sits beside Listeners under the state machine graph (Animate mode).
+There are two places to see the same data: the **Data** panel in the sidebar (available in both Design and
+Animate mode, `Alt T` cycles to it) and the **Data** tab beside Listeners under the state machine graph.
 
-- **Add property** → number, boolean, trigger, string or color. The value you set there is the value the
-  file starts with.
+- **Add property** → number, boolean, trigger, string, color or enum. The value you set there is the value
+  the file starts with.
 - Edit the view model name above the property list to identify the data contract for this artboard.
-- Right-click a property to rename or delete it. Deleting also removes the conditions and listener actions
-  that used it, so the file stays valid.
+- Right-click a property to rename, duplicate or delete it. Deleting also removes the conditions and
+  listener actions that used it, so the file stays valid.
 - **Preview** (`Ctrl P`) lists the properties of the running file and lets you change them live, which is
   the quickest way to check a transition.
+
+## The Data panel and its table
+
+The Data panel has two views, matching Rive's:
+
+- **Properties** is the blueprint: the view model name and one row per property, with an inline editor for
+  each starting value.
+- **Data table** is Rive's *table data* view: one row per property and one column per view model instance.
+  When a model has several instances, pick one from the menu at the top of the table; the footer says which
+  instance the preview plays with. Use it to fill in sample data before previewing a state machine.
+
+An **enum** property is created with its options (comma separated, e.g. `Small, Medium, Large`). The file
+stores the options as an enum definition, and the property holds the chosen option's key; a transition
+condition compares that key. Editing the labels keeps the key of any option whose label did not change, so
+existing conditions keep working.
 
 When editing a transition, choose a data property to add a typed condition. Listener actions can set a
 property, align a node to the pointer, or fire a named event. The same property list appears in both places,
@@ -113,7 +129,8 @@ editing it. Lower level helpers (`addProperty`, `propertyCondition`, `propertyLi
 
 - binding a property to a shape's own properties (a color property driving a fill, a string driving a text
   run) — OpenRive reads and preserves these bindings in files that have them, but cannot create them,
-- enum and list properties, nested view models, and data converters,
+- list properties, nested view models and data converters,
+- system enums and image, font, blob or artboard property types,
 - blend states driven by properties.
 
 Files that use those features import, edit and export byte for byte as usual; they simply cannot be

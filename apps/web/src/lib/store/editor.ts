@@ -88,7 +88,7 @@ interface EditorState {
   selectionContext: string | null;
   /** guide lines dragged from the rulers; editor-only, saved per file in this browser */
   guides: Guides;
-  leftTab: 'layers' | 'theme' | 'assets';
+  leftTab: 'layers' | 'data' | 'theme' | 'assets';
   /** the Code panel (scripts + embed snippets) is open */
   codeOpen: boolean;
   /** Replaces one artboard's guides (null removes them all); pass nothing for abId to clear every artboard. */

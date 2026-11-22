@@ -4,16 +4,26 @@
 import { readFileSync, writeFileSync } from 'fs';
 import {
   addProperty,
+  addEnum,
+  addEnumProperty,
+  artboardViewModel,
+  enumValueOf,
+  enums,
+  propertyEnum,
+  updateEnum,
   convertInputsToProperties,
   decodePath,
   encodePath,
   findProperty,
+  instances,
+  previewInstance,
   properties,
   propertyCondition,
   propertyListenerAction,
   propertyValue,
   removeProperty,
   renameViewModel,
+  renameInstance,
   setPropertyValue,
   usesInputs,
   viewModels,
@@ -160,3 +170,84 @@ for (const id of ['interactive-button', 'toggle-switch', 'favorite-star']) {
   if (id === 'interactive-button') writeFileSync('scripts/databind-converted.riv', bytes);
 }
 
+
+// --- view model instances and the Data panel's table -----------------------
+// Rive separates a view model (the blueprint) from its instances (the values),
+// and the Data panel edits one column per instance. Additional instances store
+// their values in their own file-level block, in property order.
+{
+  const idoc = newDoc('Data table');
+  const iab = idoc.artboards[0]!;
+  addProperty(idoc, iab, { name: 'health', type: 'number', value: 100 });
+  addProperty(idoc, iab, { name: 'isOn', type: 'boolean', value: true });
+  addProperty(idoc, iab, { name: 'label', type: 'string', value: 'Hero' });
+  const model = artboardViewModel(idoc, iab)!;
+  const clone = obj('ViewModelInstance', { viewModelId: model.obj.id, name: 'Clone' });
+  idoc.top.push(clone);
+  const cloneIndex = instances(idoc, model).findIndex((i) => i.name === 'Clone');
+  // append values in property order, as the panel does
+  idoc.top.push(
+    obj('ViewModelInstanceNumber', { parentId: cloneIndex, viewModelPropertyId: 0, propertyValue: 12 }),
+    obj('ViewModelInstanceBoolean', { parentId: cloneIndex, viewModelPropertyId: 1, propertyValue: false }),
+    obj('ViewModelInstanceString', { parentId: cloneIndex, viewModelPropertyId: 2, propertyValue: 'Sidekick' }),
+  );
+  renameInstance(idoc, clone.id, 'Player 2');
+  const list = instances(idoc, artboardViewModel(idoc, iab));
+  console.log('instances:', list.map((i) => `${i.name}=[${i.values.map(String).join('|')}]`).join(' '));
+  if (list.length !== 2) throw new Error(`Expected 2 instances, found ${list.length}`);
+  if (list[1]!.name !== 'Player 2') throw new Error('renameInstance did not update the instance name');
+  if (list[1]!.values.join('|') !== '12|false|Sidekick') throw new Error(`Second instance values are wrong: ${list[1]!.values.join('|')}`);
+  if (list[0]!.values.join('|') !== '100|true|Hero') throw new Error('First instance values changed');
+  if (previewInstance(idoc, iab)?.name !== list[0]!.name) throw new Error('previewInstance did not pick the first instance');
+  const ibytes = exportRiv(idoc);
+  const iback = importRiv(ibytes);
+  roundTrip('view model instances', ibytes);
+  const replayed = instances(iback, artboardViewModel(iback, iback.artboards[0]!));
+  if (replayed.map((i) => `${i.name}=[${i.values.map(String).join('|')}]`).join(' ') !== list.map((i) => `${i.name}=[${i.values.map(String).join('|')}]`).join(' ')) {
+    throw new Error('Instances did not survive a round trip');
+  }
+  console.log('view model instances: ok');
+}
+
+// --- enum properties -------------------------------------------------------
+// Rive's sixth property type: a DataEnumCustom holds the options, the property
+// references it, and instances store the chosen option's key.
+{
+  const edoc = newDoc('Variants');
+  const eab = edoc.artboards[0]!;
+  const prop = addEnumProperty(edoc, eab, { name: 'size', labels: ['Small', 'Medium', 'Large'], value: 'Medium' });
+  if (prop.type !== 'enum') throw new Error(`Expected an enum property, got ${prop.type}`);
+  const list = enums(edoc);
+  if (list.length !== 1) throw new Error(`Expected one enum, found ${list.length}`);
+  console.log('enum:', list[0]!.name, list[0]!.values.map((v) => `${v.key}=${v.value}`).join(', '));
+  if (list[0]!.values.map((v) => v.value).join() !== 'Small,Medium,Large') throw new Error('Enum options are wrong');
+  if (propertyEnum(edoc, prop)?.name !== 'size') throw new Error('Property does not resolve its enum');
+  // an instance stores the chosen option's *index*; the editor reads it back as a key
+  const stored = instances(edoc, artboardViewModel(edoc, eab))[0]!.values[0];
+  if (stored !== 1) throw new Error(`Enum default value should be the option index, got ${String(stored)}`);
+  if (enumValueOf(edoc, prop, stored) !== 'Medium') throw new Error('Enum default value does not read back as its option');
+  console.log('enum stored value:', stored, '→', enumValueOf(edoc, prop, stored));
+
+  // a transition condition compares the option key
+  const cond = propertyCondition(prop, '==', 'Large');
+  const comparator = (cond.children ?? []).find((c) => c.type === 'TransitionValueEnumComparator');
+  if (comparator?.props.value !== 'Large') throw new Error('Enum comparator did not carry the option key');
+
+  // relabelling keeps keys stable for unchanged labels
+  const before = enums(edoc)[0]!.values[0]!.key;
+  updateEnum(edoc, list[0]!.obj.id, { labels: ['Small', 'Medium', 'Huge'] });
+  const after = enums(edoc)[0]!.values;
+  if (after[0]!.key !== before) throw new Error('Relabelling changed an unchanged option key');
+  console.log('enum after relabel:', after.map((v) => `${v.key}=${v.value}`).join(', '));
+
+  // enums are file-level objects and must survive the format round trip
+  const ebytes = exportRiv(edoc);
+  const eback = importRiv(ebytes);
+  roundTrip('enum property', ebytes);
+  const eprop = properties(eback, eback.artboards[0]!)[0]!;
+  if (typeof eprop.obj.props.enumId !== 'string') throw new Error('Enum reference was lost in the round trip');
+  const replayed = enums(eback);
+  if (replayed[0]?.values.map((v) => v.value).join() !== 'Small,Medium,Huge') throw new Error('Enum options were lost in the round trip');
+  if (propertyEnum(eback, eprop)?.name !== 'size') throw new Error('Enum reference does not resolve after a round trip');
+  console.log('enum property: ok');
+}

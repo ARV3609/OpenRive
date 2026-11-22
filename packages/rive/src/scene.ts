@@ -554,6 +554,44 @@ export function hitTestShape(scene: Scene, x: number, y: number, tolerance = 4):
   return null;
 }
 
+/**
+ * Every Shape/Text/Image under a point, front-most first — the list Rive cycles
+ * through when you Alt-click to "select behind". `hitTestShape` returns only the
+ * top one; this keeps the whole stack so the editor can step through it.
+ */
+export function hitTestAll(scene: Scene, x: number, y: number, tolerance = 4): string[] {
+  const ctx = getHitCtx();
+  if (!ctx) return [];
+  const out: string[] = [];
+  for (const d of drawablesFrontToBack(scene)) {
+    if (d.type !== 'Shape' && d.type !== 'Text' && d.type !== 'Image') continue;
+    if (isHidden(scene, d.id) || isLocked(scene, d.id)) continue;
+    if (out.includes(d.id)) continue;
+    if (d.type === 'Text' || d.type === 'Image') {
+      const t = d.type === 'Text' ? textBox(scene.ab, d, scene.overrides) : imageBox(d, scene.overrides);
+      const [lx, ly] = apply(invert(scene.nodes.get(d.id)!.world), x, y);
+      if (lx >= t.x && lx <= t.x + t.w && ly >= t.y && ly <= t.y + t.h) out.push(d.id);
+      continue;
+    }
+    const hasStroke = (scene.nodes.get(d.id)?.children ?? []).some((c) => c.type === 'Stroke');
+    for (const p of pathsOfShape(scene, d.id)) {
+      const g = pathGeometry(p, scene);
+      if (!g.d) continue;
+      const world = scene.nodes.get(p.id)!.world;
+      const inv = invert(world);
+      const [lx, ly] = apply(inv, x, y);
+      const path2d = new Path2D(g.d);
+      const scale = Math.sqrt(Math.abs(world[0] * world[3] - world[1] * world[2])) || 1;
+      ctx.lineWidth = (tolerance * 2) / scale + (hasStroke ? 4 : 0);
+      if (ctx.isPointInPath(path2d, lx, ly) || ctx.isPointInStroke(path2d, lx, ly)) {
+        out.push(d.id);
+        break;
+      }
+    }
+  }
+  return out;
+}
+
 export function isHidden(scene: Scene, id: string): boolean {
   // Drawables hidden via the editor's collapse/hide flag (drawableFlags bit 0)
   let cur: string | null = id;

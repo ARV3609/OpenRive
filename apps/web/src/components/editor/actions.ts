@@ -450,6 +450,16 @@ function selectAllHere() {
 }
 
 /** Moves the selection to the sibling above (-1, nearer the front) or below (1) in the layers list, wrapping around. */
+/** True when the single selected object is a group with something to step into. */
+function canEnterGroup() {
+  const { ab } = getActive();
+  const s = st();
+  if (!ab || s.selection.length !== 1) return false;
+  const o = findObj(ab, s.selection[0]!);
+  if (!o || o.type === 'Artboard') return false;
+  return selectableChildren(ab, o.id).length > 0;
+}
+
 function selectSibling(dir: 1 | -1) {
   const s = st();
   const { ab } = getActive();
@@ -637,6 +647,28 @@ export const ACTIONS: Action[] = [
   { id: 'edit.selectAbove', label: 'Select layer above', category: 'Edit', keys: ['Alt+]'], run: () => selectSibling(-1), enabled: hasSelection },
   { id: 'edit.selectBelow', label: 'Select layer below', category: 'Edit', keys: ['Alt+['], run: () => selectSibling(1), enabled: hasSelection },
   {
+    id: 'edit.enterGroup',
+    label: 'Step into group (select its first child)',
+    category: 'Edit',
+    // Rive's Enter/Esc pair: Enter steps into the selected group, Escape steps
+    // back out. Enter is only claimed when the selection is actually a group so
+    // it stays free for text fields and other controls.
+    keys: ['Enter'],
+    enabled: () => canEnterGroup(),
+    run: () => {
+      const s = st();
+      const { ab } = getActive();
+      if (!ab || s.selection.length !== 1) return;
+      const id = s.selection[0]!;
+      const o = findObj(ab, id);
+      if (!o) return;
+      const children = selectableChildren(ab, id);
+      if (!children.length) return;
+      s.set('selectionContext', id);
+      s.select([children[0]!.id]);
+    },
+  },
+  {
     id: 'edit.deselect',
     label: 'Deselect / exit',
     category: 'Edit',
@@ -742,10 +774,14 @@ export const ACTIONS: Action[] = [
   { id: 'view.toggleMode', label: 'Toggle Design / Animate', category: 'View', keys: ['Tab'], run: () => st().setMode(st().mode === 'design' ? 'animate' : 'design') },
   {
     id: 'view.themePanel',
-    label: 'Cycle layers / theme / assets panel',
+    label: 'Cycle layers / data / theme / assets panel',
     category: 'View',
     keys: ['Alt+T'],
-    run: () => st().set('leftTab', st().leftTab === 'layers' ? 'theme' : st().leftTab === 'theme' ? 'assets' : 'layers'),
+    run: () => {
+      const order = ['layers', 'data', 'theme', 'assets'] as const;
+      const at = order.indexOf(st().leftTab as (typeof order)[number]);
+      st().set('leftTab', order[(at + 1) % order.length]!);
+    },
   },
   {
     id: 'view.selectGroups',
@@ -907,15 +943,40 @@ export function runAction(id: string) {
 }
 
 /** Finds and runs the action bound to a key event. Returns true if handled. */
+/** Keys that also type something in a text field must not fire editor commands there. */
+const TYPING_KEYS = new Set(['Enter', 'Space', ' ', 'Backspace', 'Delete', 'Escape']);
+
+/**
+ * True when the keyboard event is going into a text field, a numeric input, or
+ * any other focusable control that handles the key itself. Editor commands stay
+ * out of the way, so typing a value never enters a group or deselects.
+ */
+function isTypingTarget(e: KeyboardEvent) {
+  const el = e.target as HTMLElement | null;
+  if (!el) return false;
+  const tag = el.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  return el.isContentEditable;
+}
+
 export function handleKey(e: KeyboardEvent): boolean {
   const combo = comboFromEvent(e);
   if (!combo) return false;
+  if (isTypingTarget(e) && !/^(Ctrl|Alt)/.test(combo) && (TYPING_KEYS.has(combo) || combo.length === 1)) return false;
   const mode = st().mode;
   const candidates = ACTIONS.filter((a) => bindingsFor(a).includes(combo) && (!a.when || a.when === mode));
   const a = candidates.find(isEnabled) ?? candidates[0];
   if (!a) return false;
+  // an action that is not available must not swallow the key: a closed command
+  // leaves the platform's own behaviour in place
+  if (!isEnabled(a)) {
+    if (a.enabled) return false;
+    e.preventDefault();
+    a.run();
+    return true;
+  }
   e.preventDefault();
-  if (isEnabled(a)) a.run();
+  a.run();
   return true;
 }
 

@@ -9,6 +9,7 @@ import {
   buildScene,
   emptyBounds,
   addPoint,
+  hitTestAll,
   hitTestShape,
   invert,
   isEmpty,
@@ -155,6 +156,13 @@ export function Stage() {
   const weightPaint = useEditor((state) => state.weightPaint);
 
   const doc = useEditor((s) => s.doc);
+  /**
+   * Render-time geometry must come from the render's own `doc`, but pointer
+   * handlers can fire between a store update and React's re-render. Reading the
+   * store directly there gives the freshest document, so a drag never measures
+   * itself against a stale scene.
+   */
+  const liveDoc = () => useEditor.getState().doc ?? doc;
   const view = useEditor((s) => s.view);
   const tool = useEditor((s) => s.tool);
   const mode = useEditor((s) => s.mode);
@@ -894,6 +902,24 @@ export function Stage() {
       const doubleClick = e.detail >= 2;
       // Ctrl/Cmd+click goes straight to the object under the cursor, even inside groups
       const pickMode = e.ctrlKey || e.metaKey ? 'object' : selectMode;
+      // Alt+click cycles through the objects stacked under the pointer, the way
+      // Rive's "select behind" does, so an object covered by another stays reachable.
+      // (Alt only reaches here when another modifier is not already claiming it.)
+      if (e.altKey && !e.shiftKey && !readOnly && !doubleClick) {
+        const stack = hitTestAll(scene, sx - p.x, sy - p.y, 4 / view.zoom);
+        if (stack.length > 1) {
+          const current = s.selection.length === 1 ? stack.indexOf(s.selection[0]!) : -1;
+          const next = resolveSelectable(ab, stack[(current + 1) % stack.length]!, {
+            selection: [],
+            drill: false,
+            mode: pickMode,
+            context: s.selectionContext,
+          });
+          s.select([next]);
+          beginMove(ab, scene, [next], sx, sy);
+          return;
+        }
+      }
       // clicking outside the entered group leaves it
       const context = s.selectionContext && ancestorChain(ab, rawHit).includes(s.selectionContext) ? s.selectionContext : null;
       if (context !== s.selectionContext) s.set('selectionContext', context);
@@ -1016,6 +1042,24 @@ export function Stage() {
       const p = abPos(activeAb);
       engine.current?.pointer('move', sx - p.x, sy - p.y);
     }
+    // Hover feedback stays live while dragging or panning: Rive keeps the
+    // target outline under the pointer, and a stale hover outline reads as a
+    // selection that stopped following the object.
+    if (tool === 'select' && !previewing && doc) {
+      const ab = artboardAt(sx, sy);
+      let hit: string | null = null;
+      if (ab) {
+        const p = abPos(ab);
+        const scene = scenes.get(ab.id)!;
+        const boneHit = hitBone(ab, scene, cx, cy, p, toScreen, s.selection[0]);
+        hit = boneHit?.id ?? hitTestShape(scene, sx - p.x, sy - p.y, 4 / view.zoom);
+        if (hit && !boneHit) {
+          const deep = e.ctrlKey || e.metaKey;
+          hit = resolveSelectable(ab, hit, { selection: s.selection, drill: false, mode: deep ? 'object' : selectMode, context: s.selectionContext });
+        }
+      }
+      if (hit !== s.hoverId) s.set('hoverId', hit);
+    }
     if (!drag) {
       if (tool === 'select' && showGuides && activeAb && !previewing) {
         const g = guideLines[activeAb.id];
@@ -1035,21 +1079,6 @@ export function Stage() {
           const p = abPos(ab);
           setPen({ ...pen, cursor: [sx - p.x, sy - p.y] });
         }
-      }
-      if (tool === 'select' && !previewing && doc) {
-        const ab = artboardAt(sx, sy);
-        let hit: string | null = null;
-        if (ab) {
-          const p = abPos(ab);
-          const scene = scenes.get(ab.id)!;
-          const boneHit = hitBone(ab, scene, cx, cy, p, toScreen, s.selection[0]);
-          hit = boneHit?.id ?? hitTestShape(scene, sx - p.x, sy - p.y, 4 / view.zoom);
-          if (hit && !boneHit) {
-            const deep = e.ctrlKey || e.metaKey;
-            hit = resolveSelectable(ab, hit, { selection: s.selection, drill: false, mode: deep ? 'object' : selectMode, context: s.selectionContext });
-          }
-        }
-        if (hit !== s.hoverId) s.set('hoverId', hit);
       }
       return;
     }
@@ -1172,7 +1201,7 @@ export function Stage() {
         if (!drag.moved && Math.hypot(dx, dy) * view.zoom < 3) break;
         if (drag.dup && !drag.moved) {
           // Alt+drag: leave the originals behind and carry copies
-          duplicateAndMove(findArtboard(doc!, drag.abId)!, [...drag.start.keys()], drag.sx, drag.sy);
+          duplicateAndMove(findArtboard(liveDoc()!, drag.abId)!, [...drag.start.keys()], drag.sx, drag.sy);
           break;
         }
         if (!drag.moved) setDrag({ ...drag, moved: true });
@@ -1186,7 +1215,7 @@ export function Stage() {
           const r = snapBox(moved, drag.targets, 6 / view.zoom, { ...(lockY ? { y: [] } : {}), ...(lockX ? { x: [] } : {}) });
           dx += r.dx;
           dy += r.dy;
-          const p = abPos(findArtboard(doc!, drag.abId)!);
+          const p = abPos(findArtboard(liveDoc()!, drag.abId)!);
           lines = r.guides.map((g) =>
             g.axis === 'x' ? { axis: 'x', pos: g.pos + p.x, from: g.from + p.y, to: g.to + p.y } : { axis: 'y', pos: g.pos + p.y, from: g.from + p.x, to: g.to + p.x },
           );
