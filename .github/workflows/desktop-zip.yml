@@ -59,11 +59,12 @@ jobs:
         run: bunx electrobun build --env=stable
 
       # Electrobun's own zip keeps its internal name. This copies it to a stable,
-      # predictable name and falls back to zipping the artifacts if the name ever
-      # changes, so the workflow does not quietly publish nothing.
+      # predictable name and, when the toolchain put the app somewhere else, packs
+      # the app folder instead of publishing nothing.
       #
-      # Note the ${version} braces: inside a double-quoted PowerShell string
-      # "$version.zip" reads the property "zip" of $version, not a file name.
+      # Everything runs inside try/catch and the failure is reported as an
+      # ::error:: annotation with the tree listing, so a red run says why without
+      # anyone having to open the raw job log.
       - name: Package the zip
         shell: pwsh
         run: |
@@ -73,44 +74,76 @@ jobs:
           $named = 'dist/OpenRive-win-x64-' + $version + '.zip'
           $latest = 'dist/OpenRive-win-x64-latest.zip'
 
-          if (-not (Test-Path $artifacts)) { throw "no $artifacts: the build produced nothing" }
-          New-Item -ItemType Directory -Force dist | Out-Null
-
-          # Say what the build produced before packaging it, so a failure here is
-          # readable in the job log without downloading anything.
-          Write-Host '--- apps/desktop/artifacts'
-          $files = @(Get-ChildItem $artifacts -Recurse -File -ErrorAction SilentlyContinue)
-          if ($files.Count -eq 0) { Write-Host '  (empty)' }
-          foreach ($f in $files) { Write-Host ('  ' + $f.FullName + '  ' + [math]::Round($f.Length / 1MB, 1) + ' MB') }
-
-          $built = $files | Where-Object { $_.Extension -eq '.zip' } | Sort-Object Length -Descending | Select-Object -First 1
-          if ($built) {
-            Write-Host ('using ' + $built.Name + ' (' + [math]::Round($built.Length / 1MB, 1) + ' MB)')
-            Copy-Item -LiteralPath $built.FullName -Destination $named -ErrorAction Continue
-          } else {
-            Write-Host 'no zip in the artifacts; archiving the whole folder here'
-            Compress-Archive -Path (Join-Path $artifacts '*') -DestinationPath $named -ErrorAction Continue
+          function Show-Tree($dir, $depth) {
+            if (-not (Test-Path $dir)) { Write-Host ('  ' + $dir + ': missing'); return }
+            $items = @(Get-ChildItem $dir -File -ErrorAction SilentlyContinue)
+            if ($items.Count -eq 0) { Write-Host ('  ' + $dir + ': empty') }
+            foreach ($i in $items) { Write-Host ('  ' + $i.FullName + '  ' + [math]::Round($i.Length / 1MB, 2) + ' MB') }
+            if ($depth -le 0) { return }
+            foreach ($d in @(Get-ChildItem $dir -Directory -ErrorAction SilentlyContinue)) {
+              Show-Tree $d.FullName ($depth - 1)
+            }
           }
 
-          if (-not (Test-Path $named)) {
-            # nothing to package under apps/desktop: pack the app that was built,
-            # wherever the toolchain put it, so the run still yields a zip
-            Write-Host '--- looking for a built app elsewhere in the tree'
-            $exe = Get-ChildItem . -Recurse -File -Filter *.exe -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -notlike '*node_modules*' -and $_.FullName -notlike '*.hutch*' } |
-              Select-Object -First 1
-            Get-ChildItem . -Recurse -File -Filter *.exe -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -notlike '*node_modules*' -and $_.FullName -notlike '*.hutch*' } |
-              ForEach-Object { Write-Host ('  exe: ' + $_.FullName) }
-            if (-not $exe) { throw 'the build produced no .zip and no .exe anywhere in the tree' }
-            $root = Split-Path $exe.FullName -Parent
-            Compress-Archive -Path (Join-Path $root '*') -DestinationPath $named
-          }
-          Copy-Item -LiteralPath $named -Destination $latest
+          try {
+            New-Item -ItemType Directory -Force dist | Out-Null
 
-          # the updater reads these next to the bundle; shipped when present
-          $files | Where-Object { $_.Extension -in '.json', '.zst', '.patch' } | Copy-Item -Destination dist -ErrorAction SilentlyContinue
-          Get-ChildItem dist -File | ForEach-Object { Write-Host ('dist: ' + $_.Name + '  ' + [math]::Round($_.Length / 1MB, 1) + ' MB') }
+            Write-Host '--- what the build produced'
+            foreach ($dir in @($artifacts, 'apps/desktop/build', 'build', 'dist')) {
+              Write-Host ('--- ' + $dir)
+              Show-Tree $dir 2
+            }
+
+            $files = @(Get-ChildItem $artifacts -Recurse -File -ErrorAction SilentlyContinue)
+            $built = $files | Where-Object { $_.Extension -eq '.zip' } | Sort-Object Length -Descending | Select-Object -First 1
+            if ($built) {
+              Write-Host ('using the zip the build made: ' + $built.Name)
+              Copy-Item -LiteralPath $built.FullName -Destination $named
+            } elseif ($files.Count -gt 0) {
+              Write-Host 'no zip in the artifacts; archiving the folder here'
+              Compress-Archive -Path (Join-Path $artifacts '*') -DestinationPath $named
+            } else {
+              # The toolchain put the app somewhere else: find the executable and
+              # pack the app folder around it.
+              Write-Host '--- no artifacts folder; searching the tree for the app'
+              $exe = @(Get-ChildItem . -Recurse -File -Filter *.exe -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -notlike '*node_modules*' -and $_.FullName -notlike '*.hutch*' } |
+                Where-Object { $_.Name -notlike 'bun.exe' -and $_.Name -notlike '*.Helper.exe' })
+              foreach ($e in $exe) { Write-Host ('  exe: ' + $e.FullName + '  ' + [math]::Round($e.Length / 1MB, 2) + ' MB') }
+              if ($exe.Count -eq 0) {
+                throw 'the build produced no zip, no artifacts and no .exe anywhere in the tree'
+              }
+              $app = $exe[0]
+              $root = Split-Path $app.FullName -Parent
+              Write-Host ('packing ' + $root)
+              Compress-Archive -Path (Join-Path $root '*') -DestinationPath $named
+              # the updater manifest, when the build wrote one next to the app
+              Get-ChildItem . -Recurse -File -Include '*-update.json' -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -notlike '*node_modules*' } |
+                Select-Object -First 1 |
+                Copy-Item -Destination dist -ErrorAction SilentlyContinue
+            }
+
+            if (-not (Test-Path $named)) { throw 'packaging produced no zip' }
+            Copy-Item -LiteralPath $named -Destination $latest
+            $files | Where-Object { $_.Extension -in '.json', '.zst', '.patch' } |
+              Copy-Item -Destination dist -ErrorAction SilentlyContinue
+            Get-ChildItem dist -File |
+              ForEach-Object { Write-Host ('dist: ' + $_.Name + '  ' + [math]::Round($_.Length / 1MB, 2) + ' MB') }
+          } catch {
+            # one readable annotation, so a red run explains itself
+            $summary = @('packaging failed: ' + $_.Exception.Message)
+            foreach ($dir in @($artifacts, 'apps/desktop/build', 'build')) {
+              if (Test-Path $dir) {
+                $items = @(Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue)
+                $summary += $dir + ': ' + $items.Count + ' files'
+                $summary += @($items | Select-Object -First 12 | ForEach-Object { $_.FullName })
+              } else { $summary += $dir + ': missing' }
+            }
+            Write-Host ($summary -join "`n")
+            Write-Host ('::error title=Packaging::' + ($summary -join ' | '))
+            exit 1
+          }
 
       - name: Build diagnostics
         if: always()
