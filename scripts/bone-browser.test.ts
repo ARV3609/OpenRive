@@ -169,7 +169,8 @@ try {
     scenarios++;
     console.log(`✓ browser: ${label}`);
   };
-  const layers = page.getByRole('complementary', { name: 'Layers, theme, and assets' });
+  // the sidebar's accessible name follows its tabs: layers, data, theme, assets
+  const layers = page.getByRole('complementary', { name: /^Layers,.*assets$/ });
   const before = await state();
   await drag(point(103, 202), point(123, 212));
   let after = await state();
