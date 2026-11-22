@@ -281,7 +281,7 @@ jobs:
 
           # drop versioned zips an earlier run published, so the release stays small
           $stale = gh release view $tag --repo $repo --json assets -q '.assets[].name' |
-            Where-Object { $_ -match '^OpenRive-win-x64-\d+\.\d+\.\d+.*\.zip$' -or $_ -like 'installer-stable-*' }
+            Where-Object { $_ -match '^OpenRive-win-x64-\d+\.\d+\.\d+.*\.zip$' -or $_ -like 'installer-stable-*' -or ($_ -like 'installer-win-x64-*' -and $_ -ne 'installer-OpenRive-Setup.zip') }
           foreach ($name in $stale) {
             Write-Host ('removing stale ' + $name)
             gh release delete-asset $tag $name --repo $repo --yes
