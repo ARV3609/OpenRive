@@ -157,13 +157,13 @@ jobs:
             Copy-Item -LiteralPath $named -Destination $latest
 
             # The updater manifest names its archive and patches, so those keep
-            # their exact names. Only the installer stub is renamed, because
+            # their exact names. The installer stub is renamed because
             # "OpenRive-win-x64-latest.zip" now means the runnable app.
             foreach ($f in $files | Where-Object { $_.Extension -in '.json', '.zst', '.patch' }) {
               Copy-Item -LiteralPath $f.FullName -Destination (Join-Path 'dist' $f.Name) -ErrorAction SilentlyContinue
             }
             foreach ($f in $files | Where-Object { $_.Extension -eq '.zip' }) {
-              Copy-Item -LiteralPath $f.FullName -Destination (Join-Path 'dist' ('installer-' + $f.Name)) -ErrorAction SilentlyContinue
+              Copy-Item -LiteralPath $f.FullName -Destination (Join-Path 'dist' 'installer-OpenRive-Setup.zip') -ErrorAction SilentlyContinue
             }
             Get-ChildItem dist -File |
               ForEach-Object { Write-Host ('dist: ' + $_.Name + '  ' + [math]::Round($_.Length / 1MB, 2) + ' MB') }
@@ -281,7 +281,7 @@ jobs:
 
           # drop versioned zips an earlier run published, so the release stays small
           $stale = gh release view $tag --repo $repo --json assets -q '.assets[].name' |
-            Where-Object { $_ -match '^OpenRive-win-x64-\d+\.\d+\.\d+.*\.zip$' }
+            Where-Object { $_ -match '^OpenRive-win-x64-\d+\.\d+\.\d+.*\.zip$' -or $_ -like 'installer-stable-*' }
           foreach ($name in $stale) {
             Write-Host ('removing stale ' + $name)
             gh release delete-asset $tag $name --repo $repo --yes

@@ -31,8 +31,12 @@ Direct link, always the newest build:
 https://github.com/ARV3609/OpenRive/releases/download/desktop-latest/OpenRive-win-x64-latest.zip
 ```
 
-Unzip it and run `OpenRive.exe`; there is no installer step. The version is `0.0.0-build.<run number>` so it is
-never mistaken for a release.
+Unzip it and run `OpenRive\bin\launcher.exe`; there is no installer step. The zip holds the whole app folder
+(`bin/` with the launcher and the bundled runtime, and `Resources/`), about 197 MB unpacked, which is why the
+download is around 77 MB. The version is `0.0.0-build.<run number>` so it is never mistaken for a release.
+
+The release also carries the build's own installer stub (`installer-OpenRive-Setup.zip`) and the update manifest
+with its archive and patches, for anyone testing the in-app updater; **the zip above is the one to run.**
 
 It publishes to a **pre-release** on purpose: GitHub's `releases/latest` redirect skips pre-releases, so a
 development build can never be served to the in-app updater. The rolling release is replaced on each push;
