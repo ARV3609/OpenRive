@@ -197,6 +197,9 @@ jobs:
             tar -tf $archive.FullName 2>&1 | Select-Object -First 40 | ForEach-Object { Write-Host ('  ' + $_) }
           }
 
+      # The launcher is small on purpose (the work is done by the bundled Bun
+      # runtime), so this judges the payload as a whole: the app folder, a
+      # launcher, and enough bytes to prove the resources came along.
       - name: Check the zip holds the app
         shell: pwsh
         run: |
@@ -204,21 +207,31 @@ jobs:
           $zip = Get-ChildItem dist -Filter '*-latest.zip' | Select-Object -First 1
           if (-not $zip) { throw 'no *-latest.zip was produced' }
           $out = Join-Path $env:RUNNER_TEMP 'zipcheck'
+          if (Test-Path $out) { Remove-Item $out -Recurse -Force }
           Expand-Archive -LiteralPath $zip.FullName -DestinationPath $out -Force
-          $exe = Get-ChildItem $out -Recurse -Filter 'launcher.exe' | Select-Object -First 1
-          if (-not $exe) { $exe = Get-ChildItem $out -Recurse -Filter *.exe | Sort-Object Length -Descending | Select-Object -First 1 }
-          if (-not $exe) {
-            $seen = (Get-ChildItem $out -Recurse -File | Select-Object -First 20 | ForEach-Object { $_.Name }) -join ', '
-            throw "the zip contains no .exe, only: $seen"
+
+          $files = @(Get-ChildItem $out -Recurse -File)
+          $total = ($files | Measure-Object -Property Length -Sum).Sum
+          $launcher = $files | Where-Object { $_.Name -eq 'launcher.exe' } | Select-Object -First 1
+          $other = $files | Where-Object { $_.Extension -eq '.exe' } | Sort-Object Length -Descending | Select-Object -First 1
+          $entry = if ($launcher) { $launcher } else { $other }
+
+          if (-not $entry) {
+            $seen = ($files | Select-Object -First 20 | ForEach-Object { $_.Name }) -join ', '
+            throw "the zip contains no executable, only: $seen"
           }
-          # a stub-only zip is the bug this check exists to catch
-          if ($exe.Length -lt 5MB) { throw ('the zip holds only a small executable (' + $exe.Name + ', ' + [math]::Round($exe.Length / 1MB, 1) + ' MB): packaging grabbed the installer stub, not the app') }
-          Write-Host ('zip contains ' + $exe.Name + ' (' + [math]::Round($exe.Length / 1MB, 1) + ' MB)')
-          # Visible on the run page without downloading anything.
+          if ($total -lt 50MB -or $files.Count -lt 20) {
+            throw ('the zip holds ' + $files.Count + ' files and ' + [math]::Round($total / 1MB, 1) +
+              ' MB: that is the installer stub, not the app')
+          }
+          if (-not (Get-ChildItem $out -Recurse -Directory -Filter 'Resources')) {
+            throw 'the zip has no Resources folder: the app would start without its UI'
+          }
+
+          $inside = $entry.FullName.Substring($out.Length).TrimStart('\', '/')
           $top = @(Get-ChildItem $out | ForEach-Object { $_.Name })
-          $count = @(Get-ChildItem $out -Recurse -File).Count
-          $inside = $exe.FullName.Substring($out.Length).TrimStart('\', '/')
-          $line = 'zip holds ' + $count + ' files, run "' + $inside + '" (' + [math]::Round($exe.Length / 1MB, 1) + ' MB), top level: ' + ($top -join ', ')
+          $line = 'zip holds ' + $files.Count + ' files (' + [math]::Round($total / 1MB, 1) + ' MB), run "' +
+            $inside + '", app folder: ' + ($top -join ', ')
           Write-Host $line
           Write-Host ('::notice title=Windows zip::' + $line)
           $line >> $env:GITHUB_STEP_SUMMARY
@@ -255,7 +268,12 @@ jobs:
           '@
           }
 
-          $files = Get-ChildItem dist -File | ForEach-Object { $_.FullName }
+          # Only the stable names are published (the versioned zip is in the
+          # workflow artifact), so the release does not grow with every push.
+          $files = Get-ChildItem dist -File |
+            Where-Object { $_.Name -notmatch 'win-x64-\d+\.\d+\.\d+' -and $_.Name -notlike 'installer-OpenRive-win-x64-*' } |
+            ForEach-Object { $_.FullName }
+          foreach ($f in $files) { Write-Host ('publishing ' + (Split-Path $f -Leaf)) }
           gh release upload $tag @files --repo $repo --clobber
           if ($LASTEXITCODE -ne 0) { throw 'uploading the zip failed' }
 
