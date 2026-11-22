@@ -24,6 +24,12 @@
 - Add Rive's **Randomize exit** weights on each outgoing transition, and let a state's **Type** be changed between Single, 1D blend and Additive blend after it is created.
 - Align transition option labels with Rive ("Pause source when exiting", "Allow exit during transition").
 
+### Builds
+
+- Add a **Desktop zip** workflow: every push now produces a Windows x64 zip and publishes it to the rolling
+  `desktop-latest` pre-release (plus a workflow artifact), so there is always a downloadable `OpenRive.exe`
+  without cutting a release. Tagged releases are unchanged.
+
 ### Docs
 
 - Correct the MCP tool count (50, not 42) in the README and the architecture guide.

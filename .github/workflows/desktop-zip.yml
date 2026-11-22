@@ -1,0 +1,149 @@
+# Builds a ready-to-run Windows x64 zip on every push, so there is always a
+# downloadable OpenRive.exe without making a release by hand.
+#
+#   push to any branch   builds, publishes the zip to the rolling "desktop-latest"
+#                        pre-release, and keeps it as a workflow artifact
+#   Actions -> Desktop zip -> Run workflow   same thing on demand
+#
+# This is deliberately separate from desktop.yml: that one is the official
+# multi-platform release (tags, DMGs, signing, the updater manifests). This one
+# only answers "give me the newest Windows build", and never touches `latest`,
+# because a pre-release is excluded from GitHub's latest-release redirect that
+# the in-app updater reads.
+name: Desktop zip
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# one build per branch: a newer push cancels the older build of the same branch
+concurrency:
+  group: desktop-zip-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # the release every build is published to; the assets are replaced each time
+  ROLLING_TAG: desktop-latest
+
+jobs:
+  windows-x64:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - run: bun install --frozen-lockfile
+
+      # A build from a branch has no version tag, so stamp something unique and
+      # obviously not a release. Releases keep stamping their own tag in desktop.yml.
+      - name: Stamp the version
+        shell: bash
+        run: bun scripts/set-desktop-version.ts "0.0.0-build.${{ github.run_number }}"
+
+      # apps/desktop/build/server: the Next.js standalone bundle the app copies in
+      - name: Build the web server bundle
+        run: bun run --cwd apps/desktop build:server
+
+      # Electrobun does not cross-compile; this produces the Windows bundle,
+      # its updater manifest and the setup zip under apps/desktop/artifacts
+      - name: Build the desktop app
+        working-directory: apps/desktop
+        run: bunx electrobun build --env=stable
+
+      # Electrobun's own zip keeps its internal name. This copies it to a stable,
+      # predictable name and falls back to zipping the artifacts if the name ever
+      # changes, so the workflow does not quietly publish nothing.
+      - name: Package the zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '0.0.0-build.${{ github.run_number }}'
+          $artifacts = 'apps/desktop/artifacts'
+          if (-not (Test-Path $artifacts)) { throw "no $artifacts: the build produced nothing" }
+          New-Item -ItemType Directory -Force dist | Out-Null
+
+          $built = Get-ChildItem $artifacts -Filter *.zip | Sort-Object Length -Descending | Select-Object -First 1
+          if ($built) {
+            Write-Host "using $($built.Name) ($([math]::Round($built.Length / 1MB, 1)) MB)"
+            Copy-Item $built.FullName "dist/OpenRive-win-x64-$version.zip"
+          } else {
+            Write-Host 'no zip in the artifacts; archiving them here'
+            Compress-Archive -Path "$artifacts/*" -DestinationPath "dist/OpenRive-win-x64-$version.zip"
+          }
+
+          # the updater reads these next to the bundle; shipped when present
+          Copy-Item "dist/OpenRive-win-x64-$version.zip" 'dist/OpenRive-win-x64-latest.zip'
+          Get-ChildItem $artifacts -File |
+            Where-Object { $_.Extension -in '.json', '.zst', '.patch' } |
+            Copy-Item -Destination dist
+
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - name: Check the zip holds the app
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Get-ChildItem dist -Filter '*-latest.zip' | Select-Object -First 1
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $entries = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName).Entries
+          $names = $entries | ForEach-Object { $_.FullName }
+          $exe = $names | Where-Object { $_ -like '*.exe' } | Select-Object -First 1
+          if (-not $exe) { throw "the zip contains no .exe: $($names -join ', ')" }
+          Write-Host "zip contains $exe"
+
+      - name: Upload the workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openrive-win-x64-${{ github.run_number }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+      # The rolling pre-release. Same URL every time, so a link in a chat or a
+      # README keeps working: /releases/download/desktop-latest/OpenRive-win-x64-latest.zip
+      - name: Publish to the rolling pre-release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $repo = $env:GITHUB_REPOSITORY
+          $tag = $env:ROLLING_TAG
+
+          gh release view $tag --repo $repo *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo $repo --prerelease --title 'Desktop builds (newest first)' --notes @'
+          Windows x64 builds of OpenRive, replaced on every push.
+
+          Download **OpenRive-win-x64-latest.zip**, unzip it and run `OpenRive.exe`. The versioned zip beside it is
+          the exact build. These are unsigned development builds: Windows shows **SmartScreen -> More info -> Run
+          anyway** on first launch, and the app keeps its data in your user data folder.
+
+          For a signed, tagged release with installers for every platform, use the **Desktop** workflow instead.
+          '@
+          }
+
+          gh release upload $tag dist/* --repo $repo --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'uploading the zip failed' }
+
+      - name: Summarise
+        shell: pwsh
+        run: |
+          $version = '0.0.0-build.${{ github.run_number }}'
+          $url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/releases/download/$env:ROLLING_TAG"
+          @"
+          ### Windows x64 zip $version
+
+          - Direct download: [$url/OpenRive-win-x64-latest.zip]($url/OpenRive-win-x64-latest.zip)
+          - Exact build: \`OpenRive-win-x64-$version.zip\`
+          - Workflow artifact: openrive-win-x64-${{ github.run_number }} (14 days)
+          - Branch: \`$env:GITHUB_REF_NAME\` at $env:GITHUB_SHA
+          "@ >> $env:GITHUB_STEP_SUMMARY
