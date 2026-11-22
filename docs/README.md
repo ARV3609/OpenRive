@@ -22,7 +22,8 @@ it and working on it.
 | [Keyboard shortcuts](shortcuts.md) | All default shortcuts and how to rebind them |
 | [Templates](templates.md) | The starter templates and example files |
 | [Theme colors](theme-colors.md) | Color variables and switchable themes |
-| [Data binding](data-binding.md) | Properties that drive state machines and your app, and converting deprecated inputs |
+| [Data binding](data-binding.md) | Properties that drive state machines and your app, the Data panel and its table, and converting deprecated inputs |
+| [Rive parity](rive-parity.md) | What OpenRive does differently from Rive's editor, and what is still missing |
 | [Text & assets](text-and-assets.md) | Text objects, fonts, images and SVG import |
 | [Constraints](constraints.md) | Add and edit distance constraints |
 | [Code panel](code-panel.md) | Automation scripts, embed snippets, and a note on Rive scripting |

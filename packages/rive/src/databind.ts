@@ -22,7 +22,7 @@ import { ArtboardDoc, CoreObj, RiveDoc } from './document';
 import { obj } from './factory';
 import { isA } from './schema';
 
-export type PropertyType = 'number' | 'boolean' | 'trigger' | 'string' | 'color';
+export type PropertyType = 'number' | 'boolean' | 'trigger' | 'string' | 'color' | 'enum';
 
 export type PropertyValue = number | boolean | string;
 
@@ -74,6 +74,16 @@ const TYPES: Record<PropertyType, TypeInfo> = {
     bindable: 'BindablePropertyColor',
     propertyKey: 638,
     comparator: 'TransitionValueColorComparator',
+  },
+  // An enum property points at a DataEnumCustom by id; each instance value holds
+  // the key of the chosen DataEnumValue. Type keys come from rive-runtime's
+  // generated viewmodel headers (ViewModelPropertyEnumCustom etc).
+  enum: {
+    property: 'ViewModelPropertyEnumCustom',
+    instance: 'ViewModelInstanceEnum',
+    bindable: 'BindablePropertyEnum',
+    propertyKey: 637,
+    comparator: 'TransitionValueEnumComparator',
   },
 };
 
@@ -198,12 +208,238 @@ export function viewModels(doc: RiveDoc): ViewModelDoc[] {
   return models;
 }
 
-/** The view model an artboard is bound to, if any. */
+// ---------------------------------------------------------------------------
+// Enums
+//
+// Rive's sixth property type. A DataEnumCustom holds the name and a group of
+// DataEnumValue children (`key` is the stable identifier, `value` the label the
+// editor shows); an enum property points at its DataEnumCustom by `enumId`, and
+// an instance stores the selected key in `propertyValue`.
+
+/** The enum a property object points at, as an id when it is resolved. */
+const propsEnumId = (prop: CoreObj): string | undefined =>
+  typeof prop.props.enumId === 'string' ? prop.props.enumId : undefined;
+
+export interface EnumValueDoc {
+  obj: CoreObj;
+  key: string;
+  value: string;
+}
+
+export interface EnumDoc {
+  obj: CoreObj;
+  name: string;
+  values: EnumValueDoc[];
+}
+
+/**
+ * Every enum in the file, with its options in declaration order.
+ *
+ * A `.riv` stream is flat: the options follow their enum as file-level objects
+ * with no explicit parent, so they are read positionally from `doc.top`. Keeping
+ * that layout is what makes the format round-trip byte for byte.
+ */
+export function enums(doc: RiveDoc): EnumDoc[] {
+  const out: EnumDoc[] = [];
+  doc.top.forEach((o, i) => {
+    if (o.type !== 'DataEnumCustom') return;
+    const values: EnumValueDoc[] = [];
+    for (const next of doc.top.slice(i + 1)) {
+      if (next.type !== 'DataEnumValue') break;
+      values.push({ obj: next, key: String(next.props.key ?? ''), value: String(next.props.value ?? next.props.key ?? '') });
+    }
+    out.push({ obj: o, name: String(o.props.name ?? ''), values });
+  });
+  return out;
+}
+
+/** The enum an enum property points at. */
+export function propertyEnum(doc: RiveDoc, p: PropertyDoc): EnumDoc | undefined {
+  const id = p.obj.props.enumId;
+  if (typeof id !== 'string') return undefined;
+  return enums(doc).find((e) => e.obj.id === id);
+}
+
+/**
+ * An enum instance value is the *index* of the chosen option, not its key: the
+ * runtime resolves `ViewModelInstanceEnum.propertyValue` against the enum's
+ * value list. The editor works in keys, so convert at these two edges.
+ */
+function enumIndexOf(doc: RiveDoc, prop: PropertyDoc, value: PropertyValue): number {
+  const list = propertyEnum(doc, prop);
+  const key = coerce('enum', value);
+  if (!list?.values.length || key === undefined) return 0;
+  const at = list.values.findIndex((v) => v.key === key);
+  return at < 0 ? 0 : at;
+}
+
+/** The option key behind an enum instance value, for reading and editing. */
+export function enumValueOf(doc: RiveDoc, prop: PropertyDoc, raw: PropertyValue | undefined): string | undefined {
+  const list = propertyEnum(doc, prop);
+  if (!list?.values.length) return undefined;
+  if (typeof raw === 'string') return list.values.some((v) => v.key === raw) ? raw : list.values[0]!.key;
+  const at = typeof raw === 'number' ? raw : 0;
+  return (list.values[at] ?? list.values[0])!.key;
+}
+
+const keyOf = (label: string) =>
+  label
+    .trim()
+    .replace(/[^A-Za-z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '') || 'value';
+
+/**
+ * Creates an enum definition, ready to be referenced by an enum property.
+ *
+ * The options are file-level objects that follow the enum in the stream, which
+ * is the layout Rive writes: `DataEnumValue` has no parent reference, so the
+ * runtime reads the run of values after a `DataEnumCustom` as its options.
+ */
+export function addEnum(doc: RiveDoc, name: string, labels: string[] = ['Option 1', 'Option 2']): EnumDoc {
+  const base = name.trim() || 'Enum';
+  let unique = base;
+  let n = 2;
+  const taken = new Set(enums(doc).map((e) => e.name));
+  while (taken.has(unique)) unique = `${base} ${n++}`;
+  const seen = new Set<string>();
+  const values = labels.map((raw, i) => {
+    const label = raw.trim() || `Option ${i + 1}`;
+    const stem = keyOf(label);
+    let key = stem;
+    let suffix = 2;
+    while (seen.has(key)) key = `${stem}_${suffix++}`;
+    seen.add(key);
+    return { label, key };
+  });
+  const enumObj = obj('DataEnumCustom', { name: unique });
+  // values are file-level objects that follow the enum, in declaration order
+  const valueObjs = values.map((v) => obj('DataEnumValue', { key: v.key, value: v.label }));
+  const at = doc.top.map((o) => o.type).lastIndexOf('DataEnumCustom');
+  doc.top.splice(at < 0 ? doc.top.length : at + 1, 0, enumObj, ...valueObjs);
+  return { obj: enumObj, name: unique, values: values.map((v, i) => ({ obj: valueObjs[i]!, key: v.key, value: v.label })) };
+}
+
+/** Renames an enum and/or replaces its option labels, keeping keys stable where the label is unchanged. */
+export function updateEnum(doc: RiveDoc, enumId: string, patch: { name?: string; labels?: string[] }) {
+  const target = enums(doc).find((e) => e.obj.id === enumId);
+  if (!target) return undefined;
+  if (patch.name !== undefined && patch.name.trim()) target.obj.props.name = patch.name.trim();
+  if (patch.labels) {
+    const previous = target.values;
+    const seen = new Set<string>();
+    const next = patch.labels.map((raw, i) => {
+      const label = raw.trim() || `Option ${i + 1}`;
+      const reused = previous.find((v) => v.value === label);
+      let key = reused?.key ?? keyOf(label);
+      let suffix = 2;
+      while (seen.has(key)) key = `${keyOf(label)}_${suffix++}`;
+      seen.add(key);
+      return obj('DataEnumValue', { key, value: label });
+    });
+    // replace the value block that follows the enum in the file-level stream
+    const start = doc.top.indexOf(target.obj);
+    let end = start + 1;
+    while (end < doc.top.length && doc.top[end]!.type === 'DataEnumValue') end++;
+    doc.top.splice(start + 1, end - start - 1, ...next);
+    target.obj.children = undefined;
+
+    // a stored value is an index into the options, so repoint any that is now
+    // out of range (the runtime would otherwise read a removed option)
+    for (const inst of doc.top.filter((o) => o.type === 'ViewModelInstanceEnum')) {
+      const at = Number(inst.props.propertyValue ?? 0);
+      if (!next.length) delete inst.props.propertyValue;
+      else if (!Number.isFinite(at) || at < 0 || at >= next.length) inst.props.propertyValue = 0;
+    }
+  }
+  return target;
+}
+
+/** Adds an enum property to an artboard's view model, creating the enum when a name is given. */
+export function addEnumProperty(
+  doc: RiveDoc,
+  ab: ArtboardDoc,
+  p: { name: string; labels?: string[]; enumId?: string; value?: string; viewModelName?: string },
+): PropertyDoc {
+  let enumId = p.enumId;
+  if (!enumId) {
+    if (p.labels) enumId = addEnum(doc, p.name, p.labels).obj.id;
+    else throw new Error('An enum property needs either an existing enum or a list of option labels');
+  }
+  const target = enums(doc).find((e) => e.obj.id === enumId);
+  if (!target) throw new Error('That enum does not exist in this file');
+  const chosen = p.value ?? target.values[0]?.key;
+  const at = Math.max(0, target.values.findIndex((v) => v.key === chosen || v.value === chosen));
+  const added = addProperty(doc, ab, { name: p.name, type: 'enum', viewModelName: p.viewModelName });
+  // The reference has to exist before the stored value can be resolved, so it is
+  // written afterwards. Setting it through the property keeps every instance's
+  // value in step, including the ones `addProperty` just created.
+  added.obj.props.enumId = enumId;
+  setPropertyValue(doc, ab, added.obj.id, target.values[at]?.key ?? '');
+  return findProperty(doc, ab, added.obj.id) ?? added;
+}
+
+/** The enum an artboard is bound to, if any. */
 export function artboardViewModel(doc: RiveDoc, ab: ArtboardDoc): ViewModelDoc | undefined {
   const id = ab.artboard.props.viewModelId;
   const models = viewModels(doc);
   if (typeof id === 'string') return models.find((m) => m.obj.id === id);
   return typeof id === 'number' ? models[id] : undefined;
+}
+
+/**
+ * A view model instance somewhere in the file, with its stored values.
+ *
+ * Rive separates the *view model* (the blueprint) from its *instances* (the
+ * values), and the Data panel shows both: the model's property list and a
+ * table with one column per instance. Exposing instances here keeps that
+ * distinction available to the UI instead of flattening it to the model.
+ */
+export interface ViewModelInstanceDoc {
+  obj: CoreObj;
+  name: string;
+  index: number;
+  /** file-level property values, keyed by property index */
+  values: (PropertyValue | undefined)[];
+}
+
+/** Every instance of a view model, in file order, with its stored values. */
+export function instances(doc: RiveDoc, vm: ViewModelDoc | undefined): ViewModelInstanceDoc[] {
+  if (!vm) return [];
+  const out: ViewModelInstanceDoc[] = [];
+  doc.top.forEach((o, i) => {
+    if (!matchesViewModel(o.props.viewModelId, vm)) return;
+    if (o.type !== 'ViewModelInstance') return;
+    // Values follow their instance in the file-level stream, in property order.
+    // Parsing them positionally (rather than by parentId) is how viewModels()
+    // already reads them, and keeps nested and top-level instances alike.
+    const values: (PropertyValue | undefined)[] = [];
+    for (const child of doc.top.slice(i + 1)) {
+      if (!isA(child.type, 'ViewModelInstanceValue')) break;
+      const p = vm.properties.find((prop) => prop.index === Number(child.props.viewModelPropertyId));
+      if (p) values[p.index] = child.props.propertyValue as PropertyValue | undefined;
+    }
+    out.push({ obj: o, name: String(o.props.name ?? `Instance ${out.length + 1}`), index: out.length, values });
+  });
+  return out;
+}
+
+/**
+ * The instance a view previews against: the artboard's own instance when it
+ * has one, otherwise the model's first instance. Undefined for a model that
+ * has no instance at all, which is a model that cannot be previewed.
+ */
+export function previewInstance(doc: RiveDoc, ab: ArtboardDoc): ViewModelInstanceDoc | undefined {
+  const vm = artboardViewModel(doc, ab);
+  return vm ? instances(doc, vm)[0] : undefined;
+}
+
+/** Renames a view model instance. */
+export function renameInstance(doc: RiveDoc, instanceId: string, name: string) {
+  const inst = doc.top.find((o) => o.id === instanceId && o.type === 'ViewModelInstance');
+  const trimmed = name.trim();
+  if (!inst || !trimmed) return undefined;
+  inst.props.name = trimmed;
+  return inst;
 }
 
 /** The data binding properties an artboard exposes. */
@@ -273,6 +509,7 @@ export function ensureViewModel(doc: RiveDoc, ab: ArtboardDoc, name?: string): V
 
 function coerce(type: PropertyType, value: PropertyValue | undefined): PropertyValue | undefined {
   if (value === undefined) return undefined;
+  if (type === 'enum') return value === '' ? undefined : String(value);
   if (type === 'boolean') return !!value;
   if (type === 'string') return String(value);
   if (type === 'color') return parseColorValue(value);
@@ -291,7 +528,9 @@ export function addProperty(
   const index = vm.properties.length;
   const propObj = obj(info.property, { name: p.name });
   doc.top.splice(propertyInsertAt(doc, vm), 0, propObj);
-  const value = coerce(p.type, p.value);
+  // an enum instance stores the chosen option's index, resolved once the enum is set
+  const value = p.type === 'enum' ? undefined : coerce(p.type, p.value);
+  const enumIndex = p.type === 'enum' ? 0 : undefined;
   for (const inst of instancesOfModel(doc, vm)) {
     const start = doc.top.indexOf(inst.obj);
     if (start < 0) continue;
@@ -300,7 +539,7 @@ export function addProperty(
     doc.top.splice(at, 0, obj(info.instance, {
       ...(inst.instanceIndex > 0 ? { parentId: inst.instanceIndex } : {}),
       viewModelPropertyId: index,
-      ...(value !== undefined ? { propertyValue: value } : {}),
+      ...(value !== undefined ? { propertyValue: value } : enumIndex !== undefined ? { propertyValue: enumIndex } : {}),
     }));
   }
   return findProperty(doc, ab, propObj.id)!;
@@ -310,6 +549,11 @@ export function addProperty(
 export function setPropertyValue(doc: RiveDoc, ab: ArtboardDoc, ref: string, value: PropertyValue) {
   const p = findProperty(doc, ab, ref);
   if (!p?.value) return undefined;
+  // an enum updates store the option's index, which is what the runtime reads
+  if (p.type === 'enum') {
+    p.value.props.propertyValue = enumIndexOf(doc, p, value);
+    return p;
+  }
   const v = coerce(p.type, value);
   if (v === undefined) delete p.value.props.propertyValue;
   else p.value.props.propertyValue = v;
@@ -480,6 +724,7 @@ export function propertyCondition(p: PropertyDoc, op: ConditionOp = '==', value?
   else if (p.type === 'number') literal.value = Number(value ?? 0);
   else if (p.type === 'string') literal.value = String(value ?? '');
   else if (p.type === 'color') literal.value = parseColorValue(value ?? 0);
+  else if (p.type === 'enum') literal.value = String(value ?? '');
   return obj('TransitionViewModelCondition', opValue ? { opValue } : {}, [
     obj(info.bindable, {}),
     obj('DataBindContext', { propertyKey: info.propertyKey, sourcePathIds: pathTo(p) }),

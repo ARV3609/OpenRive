@@ -1,20 +1,23 @@
 'use client';
 
-import { FileImage, GripVertical, Layers, Palette, PanelLeftClose, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { Braces, FileImage, GripVertical, Layers, Palette, PanelLeftClose, PanelRightClose, PanelRightOpen } from 'lucide-react';
 import { TabStrip } from '@openrive/ui';
 import { useEditorLayoutController } from '@/lib/client/useEditorLayout';
 import { AssetsPanel } from './AssetsPanel';
 import { CodePanel } from './CodePanel';
+import { DataPanel } from './DataPanel';
 import { Hierarchy } from './Hierarchy';
 import { Inspector } from './Inspector';
 import { Stage } from './Stage';
 import { ThemePanel } from './ThemePanel';
 import { AnimatePanel } from './Timeline';
 
-type LeftTab = 'layers' | 'theme' | 'assets';
+type LeftTab = 'layers' | 'data' | 'theme' | 'assets';
 
+/** Same order as Rive's sidebar: Hierarchy, Data, then the file's assets and theme. */
 const leftTabs = [
   { id: 'layers' as const, label: 'Layers', icon: <Layers size={12} />, title: 'Layers (Alt+T to switch)' },
+  { id: 'data' as const, label: 'Data', icon: <Braces size={12} />, title: 'Data binding (Alt+T to switch)' },
   { id: 'theme' as const, label: 'Theme', icon: <Palette size={12} />, title: 'Theme (Alt+T to switch)' },
   { id: 'assets' as const, label: 'Assets', icon: <FileImage size={12} />, title: 'Assets (Alt+T to switch)' },
 ];
@@ -54,7 +57,16 @@ export function EditorWorkspace({ mode, leftTab, codeOpen, onLeftTabChange }: Ed
     else if (!leftOpen) toggleLeftSidebar();
   };
 
-  const leftPanel = leftTab === 'layers' ? <Hierarchy /> : leftTab === 'theme' ? <ThemePanel /> : <AssetsPanel />;
+  const leftPanel =
+    leftTab === 'layers' ? (
+      <Hierarchy />
+    ) : leftTab === 'data' ? (
+      <DataPanel />
+    ) : leftTab === 'theme' ? (
+      <ThemePanel />
+    ) : (
+      <AssetsPanel />
+    );
 
   return (
     <div ref={rootRef} className={`editor-workspace editor-layout-${layoutMode} relative flex-1 flex min-h-0 min-w-0`} data-layout-loaded={loaded}>
@@ -65,7 +77,7 @@ export function EditorWorkspace({ mode, leftTab, codeOpen, onLeftTabChange }: Ed
       <aside
         className={`editor-sidebar editor-sidebar-left shrink-0 border-r border-line bg-bg1 flex flex-col ${leftOpen ? 'editor-panel-open' : 'editor-panel-collapsed'} ${layoutMode === 'compact' && leftDrawerOpen ? 'editor-drawer-open' : ''}`}
         style={{ width: layoutMode === 'wide' ? (leftOpen ? leftWidth : 48) : 48 }}
-        aria-label="Layers, theme, and assets"
+        aria-label="Layers, data, theme, and assets"
       >
         {leftOpen ? (
           <>

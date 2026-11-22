@@ -15,6 +15,38 @@ Every release has installers attached, built on GitHub Actions:
 
 Builds for a branch or pull request are available as workflow artifacts from the **Desktop** workflow run.
 
+## A Windows build on every push
+
+For trying the newest code without cutting a release, the **Desktop zip** workflow
+(`.github/workflows/desktop-zip.yml`) runs on every push to any branch and produces a Windows x64 zip:
+
+| Where | What |
+| --- | --- |
+| [releases/tag/desktop-latest](https://github.com/ARV3609/OpenRive/releases/tag/desktop-latest) | `OpenRive-win-x64-latest.zip` (same URL every time) and the same build under its version |
+| The workflow run | `openrive-win-x64-<run>` artifact, kept for 14 days |
+
+Direct link, always the newest build:
+
+```
+https://github.com/ARV3609/OpenRive/releases/download/desktop-latest/OpenRive-win-x64-latest.zip
+```
+
+Unzip it and run `OpenRive\bin\launcher.exe`; there is no installer step. The zip holds the whole app folder
+(`bin/` with the launcher and the bundled runtime, and `Resources/`), about 197 MB unpacked, which is why the
+download is around 77 MB. The version is `0.0.0-build.<run number>` so it is never mistaken for a release.
+
+The release also carries the build's own installer stub (`installer-OpenRive-Setup.zip`) and the update manifest
+with its archive and patches, for anyone testing the in-app updater; **the zip above is the one to run.**
+
+It publishes to a **pre-release** on purpose: GitHub's `releases/latest` redirect skips pre-releases, so a
+development build can never be served to the in-app updater. The rolling release is replaced on each push;
+per-run history is in the Actions tab and in the artifacts.
+
+> Actions must be enabled for the repository (**Settings → Actions → General → Allow all actions**) and the
+> workflow's `GITHUB_TOKEN` needs **Read and write permissions**, which Events are granted by default on a new
+> fork. Nothing else has to be configured, and no secrets are used — the build is unsigned, like the branch
+> builds of the **Desktop** workflow.
+
 ### First launch
 
 The installers are not signed with a developer certificate yet, so macOS and Windows ask you to approve the app once:

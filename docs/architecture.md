@@ -83,8 +83,8 @@ stack; AWS S3 and Cloudflare R2 use the same adapter and environment contract.
 ### Editor UI: `apps/web/src/components/editor`
 
 `Editor.tsx` lays out the panels. `Stage.tsx` holds the canvas, SVG overlay, tools and inline text editing.
-`Inspector.tsx`, `Hierarchy.tsx`, `ThemePanel.tsx`, `AssetsPanel.tsx`, `CodePanel.tsx`, `Timeline.tsx` and
-`StateMachinePanel.tsx` are the other panels. `actions.ts` is the registry of commands (label, shortcut, enabled
+`Inspector.tsx`, `Hierarchy.tsx`, `DataPanel.tsx`, `ThemePanel.tsx`, `AssetsPanel.tsx`, `CodePanel.tsx`,
+`Timeline.tsx` and `StateMachinePanel.tsx` are the other panels. `actions.ts` is the registry of commands (label, shortcut, enabled
 state, run) used by shortcuts, menus and the shortcuts dialog. Shared shells — `Modal`, `Tabs`, `ListRow`,
 `PanelHeader` — live in `packages/ui`.
 
@@ -111,7 +111,7 @@ writes it from the CLI.
 ### Tools: `apps/cli`
 
 `project-store.ts` wraps the database for Bun processes; `commands.ts` holds the scriptable commands; `tui/app.tsx` is
-the OpenTUI interface; `mcp-server.ts` exposes 42 MCP tools. All of them go through `packages/rive`'s API.
+the OpenTUI interface; `mcp-server.ts` exposes 50 MCP tools. All of them go through `packages/rive`'s API.
 
 ### Access control
 

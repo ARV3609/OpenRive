@@ -102,7 +102,7 @@ different action in each mode.
 | Focus on selection (or fit the artboard) | `Shift+2`, `F` |
 | Zoom to fit all artboards | `Shift+3` |
 | Toggle Design / Animate | `Tab` |
-| Cycle layers / theme / assets panel | `Alt+T` |
+| Cycle layers / data / theme / assets panel | `Alt+T` |
 | Click selects groups | `Alt+G` |
 | Show rulers | `Alt+R` |
 | Show grid | `Ctrl+'` |

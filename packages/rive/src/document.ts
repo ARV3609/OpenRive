@@ -73,7 +73,7 @@ export const newId = () => nanoid(10);
 // ---------------------------------------------------------------------------
 // Reference tables: which properties hold indices, and into which list.
 
-type RefSpace = 'component' | 'animation' | 'stateMachine' | 'state' | 'input' | 'asset' | 'artboard' | 'viewModel' | 'viewModelInstance';
+type RefSpace = 'component' | 'animation' | 'stateMachine' | 'state' | 'input' | 'asset' | 'artboard' | 'viewModel' | 'viewModelInstance' | 'dataEnum';
 
 const REF_SPACES: Record<string, RefSpace> = {
   'Component.parentId': 'component',
@@ -155,6 +155,8 @@ const REF_SPACES: Record<string, RefSpace> = {
   'ScriptedInterpolator.scriptAssetId': 'asset',
   'ArtboardComponentListOverride.artboardId': 'artboard',
   'ScriptInputArtboard.artboardId': 'artboard',
+  // an enum property points at its DataEnumCustom; the instance stores the value key
+  'ViewModelPropertyEnumCustom.enumId': 'dataEnum',
   'TransitionValueIdComparator.value': 'component',
   'TransitionValueAssetComparator.value': 'asset',
   'TransitionValueArtboardComparator.value': 'artboard',
@@ -341,6 +343,9 @@ export function importRiv(bytes: Uint8Array): RiveDoc {
   const assetIds = assets.map((a) => a.id);
   const viewModelIds = doc.top.filter((o) => isA(o.type, 'ViewModel')).map((o) => o.id);
   const viewModelInstanceIds = doc.top.filter((o) => o.type === 'ViewModelInstance').map((o) => o.id);
+  // DataEnumCustom holds its DataEnumValue children, so it stays a single
+  // file-level object; enum properties reference it by index in that list.
+  const dataEnumIds = doc.top.filter((o) => o.type === 'DataEnumCustom').map((o) => o.id);
   const resolveProps = (o: CoreObj, ctx: { idx: AbIndex; states?: CoreObj[]; inputs?: CoreObj[] }) => {
     for (const [name, value] of Object.entries(o.props)) {
       if (typeof value !== 'number') continue;
@@ -374,6 +379,9 @@ export function importRiv(bytes: Uint8Array): RiveDoc {
           break;
         case 'viewModelInstance':
           list = viewModelInstanceIds;
+          break;
+        case 'dataEnum':
+          list = dataEnumIds;
           break;
       }
       if (list && value >= 0 && value < list.length) o.props[name] = list[value];
@@ -461,11 +469,13 @@ export function exportRiv(doc: RiveDoc): Uint8Array {
   };
   const viewModelIndex = new Map(doc.top.filter((o) => isA(o.type, 'ViewModel')).map((o, i) => [o.id, i]));
   const viewModelInstanceIndex = new Map(doc.top.filter((o) => o.type === 'ViewModelInstance').map((o, i) => [o.id, i]));
+  const dataEnumIndex = new Map(doc.top.filter((o) => o.type === 'DataEnumCustom').map((o, i) => [o.id, i]));
   const fileResolve = (space: RefSpace, id: string) => {
     if (space === 'asset') return assetIndex.get(id);
     if (space === 'artboard') return artboardIndex.get(id);
     if (space === 'viewModel') return viewModelIndex.get(id);
     if (space === 'viewModelInstance') return viewModelInstanceIndex.get(id);
+    if (space === 'dataEnum') return dataEnumIndex.get(id);
     return undefined;
   };
 

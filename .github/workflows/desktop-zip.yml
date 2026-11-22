@@ -1,0 +1,305 @@
+# Builds a ready-to-run Windows x64 zip on every push, so there is always a
+# downloadable OpenRive.exe without making a release by hand.
+#
+#   push to any branch   builds, publishes the zip to the rolling "desktop-latest"
+#                        pre-release, and keeps it as a workflow artifact
+#   Actions -> Desktop zip -> Run workflow   same thing on demand
+#
+# This is deliberately separate from desktop.yml: that one is the official
+# multi-platform release (tags, DMGs, signing, the updater manifests). This one
+# only answers "give me the newest Windows build", and never touches `latest`,
+# because a pre-release is excluded from GitHub's latest-release redirect that
+# the in-app updater reads.
+name: Desktop zip
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# one build per branch: a newer push cancels the older build of the same branch
+concurrency:
+  group: desktop-zip-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # the release every build is published to; the assets are replaced each time
+  ROLLING_TAG: desktop-latest
+
+jobs:
+  windows-x64:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - run: bun install --frozen-lockfile
+
+      # A build from a branch has no version tag, so stamp something unique and
+      # obviously not a release. Releases keep stamping their own tag in desktop.yml.
+      - name: Stamp the version
+        shell: bash
+        run: bun scripts/set-desktop-version.ts "0.0.0-build.${{ github.run_number }}"
+
+      # apps/desktop/build/server: the Next.js standalone bundle the app copies in
+      - name: Build the web server bundle
+        run: bun run --cwd apps/desktop build:server
+
+      # Electrobun does not cross-compile; this produces the Windows bundle,
+      # its updater manifest and the setup zip under apps/desktop/artifacts
+      - name: Build the desktop app
+        working-directory: apps/desktop
+        run: bunx electrobun build --env=stable
+
+      # Electrobun's own zip keeps its internal name. This copies it to a stable,
+      # predictable name and, when the toolchain put the app somewhere else, packs
+      # the app folder instead of publishing nothing.
+      #
+      # Everything runs inside try/catch and the failure is reported as an
+      # ::error:: annotation with the tree listing, so a red run says why without
+      # anyone having to open the raw job log.
+      # Electrobun 2.x leaves several things in apps/desktop/artifacts on Windows:
+      # a "-Setup.zip" installer stub of about a megabyte (it expects the update
+      # archive beside it, so it is not runnable on its own), a "-OpenRive.tar.zst"
+      # holding the actual app bundle (tens of megabytes), and the updater
+      # manifest. The runnable zip is therefore built from the app inside the
+      # archive, not from the stub. Everything is reported through ::notice and
+      # ::error annotations, because job logs are not always reachable.
+      - name: Package the zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '0.0.0-build.${{ github.run_number }}'
+          $artifacts = 'apps/desktop/artifacts'
+          $named = 'dist/OpenRive-win-x64-' + $version + '.zip'
+          $latest = 'dist/OpenRive-win-x64-latest.zip'
+          $note = New-Object System.Collections.Generic.List[string]
+
+          function Show-Tree($dir, $depth) {
+            if (-not (Test-Path $dir)) { Write-Host ('  ' + $dir + ': missing'); return }
+            $items = @(Get-ChildItem $dir -File -ErrorAction SilentlyContinue)
+            if ($items.Count -eq 0) { Write-Host ('  ' + $dir + ': empty') }
+            foreach ($i in $items) { Write-Host ('  ' + $i.FullName + '  ' + [math]::Round($i.Length / 1MB, 2) + ' MB') }
+            if ($depth -le 0) { return }
+            foreach ($d in @(Get-ChildItem $dir -Directory -ErrorAction SilentlyContinue)) {
+              Show-Tree $d.FullName ($depth - 1)
+            }
+          }
+
+          try {
+            New-Item -ItemType Directory -Force dist | Out-Null
+            Write-Host '--- what the build produced'
+            Show-Tree $artifacts 3
+
+            $files = @(Get-ChildItem $artifacts -Recurse -File -ErrorAction SilentlyContinue)
+            $stub = $files | Where-Object { $_.Extension -eq '.zip' } | Sort-Object Length -Descending | Select-Object -First 1
+            $archive = $files | Where-Object { $_.Name -like '*.tar.zst' } | Sort-Object Length -Descending | Select-Object -First 1
+
+            $appDir = $null
+            if ($archive) {
+              # tar on the Windows runner is bsdtar: it reads zstd archives
+              $extract = Join-Path $env:RUNNER_TEMP 'app'
+              New-Item -ItemType Directory -Force $extract | Out-Null
+              Write-Host ('extracting ' + $archive.Name + ' (' + [math]::Round($archive.Length / 1MB, 1) + ' MB)')
+              tar -xf $archive.FullName -C $extract
+              if ($LASTEXITCODE -ne 0) { throw ('tar failed to extract ' + $archive.Name) }
+
+              # The archive unpacks to one app folder with bin/ (launcher, the
+              # bundled Bun runtime, the native libraries) and resources/ in it.
+              # The whole folder is the app; zipping only bin/ would lose resources.
+              Write-Host '--- extracted'
+              Get-ChildItem $extract -Directory | ForEach-Object { Write-Host ('  ' + $_.Name) }
+              $roots = @(Get-ChildItem $extract -Directory)
+              foreach ($r in $roots) {
+                if ((Test-Path (Join-Path $r.FullName 'bin')) -or (Test-Path (Join-Path $r.FullName 'resources'))) {
+                  $appDir = $r.FullName
+                  break
+                }
+              }
+              if (-not $appDir -and $roots.Count -eq 1) { $appDir = $roots[0].FullName }
+
+              if ($appDir) {
+                # the launcher is the entry point the user runs; report it, and the
+                # byte size of everything the zip will hold
+                $entry = Get-ChildItem $appDir -Recurse -File -Filter 'launcher.exe' |
+                  Select-Object -First 1
+                $total = (Get-ChildItem $appDir -Recurse -File | Measure-Object -Property Length -Sum).Sum
+                $kids = @(Get-ChildItem $appDir | ForEach-Object { $_.Name })
+                $note.Add('app: ' + (Split-Path $appDir -Leaf) + ' (' + [math]::Round($total / 1MB, 1) + ' MB, ' +
+                  $kids.Count + ' entries: ' + ($kids -join ', ') + ')')
+                if ($entry) { $note.Add('run ' + (Split-Path $entry.FullName -Leaf)) }
+              } else {
+                $note.Add('the update archive held no recognisable app folder; falling back to the installer stub')
+              }
+            } elseif ($stub) {
+              $note.Add(('no update archive; falling back to ' + $stub.Name))
+            }
+
+            if ($appDir) {
+              # keep the folder inside the zip: the app expects its own directory
+              Compress-Archive -LiteralPath $appDir -DestinationPath $named
+            } elseif ($stub) {
+              Copy-Item -LiteralPath $stub.FullName -Destination $named
+            } elseif ($files.Count -gt 0) {
+              Compress-Archive -Path (Join-Path $artifacts '*') -DestinationPath $named
+            } else {
+              throw 'the build produced no artifacts at all'
+            }
+
+            if (-not (Test-Path $named)) { throw 'packaging produced no zip' }
+            Copy-Item -LiteralPath $named -Destination $latest
+
+            # The updater manifest names its archive and patches, so those keep
+            # their exact names. The installer stub is renamed because
+            # "OpenRive-win-x64-latest.zip" now means the runnable app.
+            foreach ($f in $files | Where-Object { $_.Extension -in '.json', '.zst', '.patch' }) {
+              Copy-Item -LiteralPath $f.FullName -Destination (Join-Path 'dist' $f.Name) -ErrorAction SilentlyContinue
+            }
+            foreach ($f in $files | Where-Object { $_.Extension -eq '.zip' }) {
+              Copy-Item -LiteralPath $f.FullName -Destination (Join-Path 'dist' 'installer-OpenRive-Setup.zip') -ErrorAction SilentlyContinue
+            }
+            Get-ChildItem dist -File |
+              ForEach-Object { Write-Host ('dist: ' + $_.Name + '  ' + [math]::Round($_.Length / 1MB, 2) + ' MB') }
+
+            $line = 'packaged ' + (Split-Path $named -Leaf) + ' from ' + ($note -join '; ')
+            Write-Host $line
+            Write-Host ('::notice title=Windows zip::' + $line)
+            $line >> $env:GITHUB_STEP_SUMMARY
+          } catch {
+            $summary = @('packaging failed: ' + $_.Exception.Message)
+            foreach ($dir in @($artifacts, 'apps/desktop/build', 'build')) {
+              if (Test-Path $dir) {
+                $items = @(Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue)
+                $summary += ($dir + ': ' + $items.Count + ' files')
+                $summary += @($items | Select-Object -First 12 | ForEach-Object { $_.FullName })
+              } else { $summary += ($dir + ': missing') }
+            }
+            Write-Host ($summary -join "`n")
+            Write-Host ('::error title=Packaging::' + ($summary -join ' | '))
+            exit 1
+          }
+
+      - name: Build diagnostics
+        if: always()
+        shell: pwsh
+        run: |
+          foreach ($dir in @('apps/desktop/artifacts', 'apps/desktop/build', 'build')) {
+            Write-Host ('--- ' + $dir)
+            if (Test-Path $dir) {
+              Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue |
+                ForEach-Object { Write-Host ('  ' + $_.FullName + '  ' + [math]::Round($_.Length / 1MB, 1) + ' MB') }
+            } else { Write-Host '  (missing)' }
+          }
+          foreach ($archive in @(Get-ChildItem 'apps/desktop/artifacts' -Filter '*.tar.zst' -ErrorAction SilentlyContinue)) {
+            Write-Host ('--- contents of ' + $archive.Name)
+            tar -tf $archive.FullName 2>&1 | Select-Object -First 40 | ForEach-Object { Write-Host ('  ' + $_) }
+          }
+
+      # The launcher is small on purpose (the work is done by the bundled Bun
+      # runtime), so this judges the payload as a whole: the app folder, a
+      # launcher, and enough bytes to prove the resources came along.
+      - name: Check the zip holds the app
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Get-ChildItem dist -Filter '*-latest.zip' | Select-Object -First 1
+          if (-not $zip) { throw 'no *-latest.zip was produced' }
+          $out = Join-Path $env:RUNNER_TEMP 'zipcheck'
+          if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+          Expand-Archive -LiteralPath $zip.FullName -DestinationPath $out -Force
+
+          $files = @(Get-ChildItem $out -Recurse -File)
+          $total = ($files | Measure-Object -Property Length -Sum).Sum
+          $launcher = $files | Where-Object { $_.Name -eq 'launcher.exe' } | Select-Object -First 1
+          $other = $files | Where-Object { $_.Extension -eq '.exe' } | Sort-Object Length -Descending | Select-Object -First 1
+          $entry = if ($launcher) { $launcher } else { $other }
+
+          if (-not $entry) {
+            $seen = ($files | Select-Object -First 20 | ForEach-Object { $_.Name }) -join ', '
+            throw "the zip contains no executable, only: $seen"
+          }
+          if ($total -lt 50MB -or $files.Count -lt 20) {
+            throw ('the zip holds ' + $files.Count + ' files and ' + [math]::Round($total / 1MB, 1) +
+              ' MB: that is the installer stub, not the app')
+          }
+          if (-not (Get-ChildItem $out -Recurse -Directory -Filter 'Resources')) {
+            throw 'the zip has no Resources folder: the app would start without its UI'
+          }
+
+          $inside = $entry.FullName.Substring($out.Length).TrimStart('\', '/')
+          $top = @(Get-ChildItem $out | ForEach-Object { $_.Name })
+          $line = 'zip holds ' + $files.Count + ' files (' + [math]::Round($total / 1MB, 1) + ' MB), run "' +
+            $inside + '", app folder: ' + ($top -join ', ')
+          Write-Host $line
+          Write-Host ('::notice title=Windows zip::' + $line)
+          $line >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload the workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openrive-win-x64-${{ github.run_number }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+      # The rolling pre-release. Same URL every time, so a link in a chat or a
+      # README keeps working: /releases/download/desktop-latest/OpenRive-win-x64-latest.zip
+      - name: Publish to the rolling pre-release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $repo = $env:GITHUB_REPOSITORY
+          $tag = $env:ROLLING_TAG
+
+          gh release view $tag --repo $repo *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo $repo --prerelease --title 'Desktop builds (newest first)' --notes @'
+          Windows x64 builds of OpenRive, replaced on every push.
+
+          Download **OpenRive-win-x64-latest.zip**, unzip it and run `OpenRive.exe`. The versioned zip beside it is
+          the exact build. These are unsigned development builds: Windows shows **SmartScreen -> More info -> Run
+          anyway** on first launch, and the app keeps its data in your user data folder.
+
+          For a signed, tagged release with installers for every platform, use the **Desktop** workflow instead.
+          '@
+          }
+
+          # Only the stable names are published (the versioned zip is in the
+          # workflow artifact), so the release does not grow with every push.
+          $files = Get-ChildItem dist -File |
+            Where-Object { $_.Name -notmatch 'win-x64-\d+\.\d+\.\d+' -and $_.Name -notlike 'installer-OpenRive-win-x64-*' } |
+            ForEach-Object { $_.FullName }
+
+          # drop versioned zips an earlier run published, so the release stays small
+          $stale = gh release view $tag --repo $repo --json assets -q '.assets[].name' |
+            Where-Object { $_ -match '^OpenRive-win-x64-\d+\.\d+\.\d+.*\.zip$' -or $_ -like 'installer-stable-*' -or ($_ -like 'installer-win-x64-*' -and $_ -ne 'installer-OpenRive-Setup.zip') }
+          foreach ($name in $stale) {
+            Write-Host ('removing stale ' + $name)
+            gh release delete-asset $tag $name --repo $repo --yes
+          }
+          foreach ($f in $files) { Write-Host ('publishing ' + (Split-Path $f -Leaf)) }
+          gh release upload $tag @files --repo $repo --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'uploading the zip failed' }
+
+      - name: Summarise
+        shell: pwsh
+        run: |
+          $version = '0.0.0-build.${{ github.run_number }}'
+          $url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/releases/download/$env:ROLLING_TAG"
+          @"
+          ### Windows x64 zip $version
+
+          - Direct download: [$url/OpenRive-win-x64-latest.zip]($url/OpenRive-win-x64-latest.zip)
+          - Exact build: \`OpenRive-win-x64-${version}.zip\`
+          - Workflow artifact: openrive-win-x64-${{ github.run_number }} (14 days)
+          - Branch: \`$env:GITHUB_REF_NAME\` at $env:GITHUB_SHA
+          "@ >> $env:GITHUB_STEP_SUMMARY
