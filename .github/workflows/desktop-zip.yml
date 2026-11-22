@@ -111,21 +111,40 @@ jobs:
               tar -xf $archive.FullName -C $extract
               if ($LASTEXITCODE -ne 0) { throw ('tar failed to extract ' + $archive.Name) }
 
-              # the app is the largest executable; the 1.2 MB *-Setup.exe is a stub
-              $exe = Get-ChildItem $extract -Recurse -File -Filter *.exe |
-                Sort-Object Length -Descending | Select-Object -First 1
-              if ($exe) {
-                $appDir = Split-Path $exe.FullName -Parent
-                $note.Add(('app: ' + $exe.Name + ' (' + [math]::Round($exe.Length / 1MB, 1) + ' MB) in ' + $appDir))
+              # The archive unpacks to one app folder with bin/ (launcher, the
+              # bundled Bun runtime, the native libraries) and resources/ in it.
+              # The whole folder is the app; zipping only bin/ would lose resources.
+              Write-Host '--- extracted'
+              Get-ChildItem $extract -Directory | ForEach-Object { Write-Host ('  ' + $_.Name) }
+              $roots = @(Get-ChildItem $extract -Directory)
+              foreach ($r in $roots) {
+                if ((Test-Path (Join-Path $r.FullName 'bin')) -or (Test-Path (Join-Path $r.FullName 'resources'))) {
+                  $appDir = $r.FullName
+                  break
+                }
+              }
+              if (-not $appDir -and $roots.Count -eq 1) { $appDir = $roots[0].FullName }
+
+              if ($appDir) {
+                # the launcher is the entry point the user runs; report it, and the
+                # byte size of everything the zip will hold
+                $entry = Get-ChildItem $appDir -Recurse -File -Filter 'launcher.exe' |
+                  Select-Object -First 1
+                $total = (Get-ChildItem $appDir -Recurse -File | Measure-Object -Property Length -Sum).Sum
+                $kids = @(Get-ChildItem $appDir | ForEach-Object { $_.Name })
+                $note.Add('app: ' + (Split-Path $appDir -Leaf) + ' (' + [math]::Round($total / 1MB, 1) + ' MB, ' +
+                  $kids.Count + ' entries: ' + ($kids -join ', ') + ')')
+                if ($entry) { $note.Add('run ' + (Split-Path $entry.FullName -Leaf)) }
               } else {
-                $note.Add('the update archive held no .exe; falling back to the installer stub')
+                $note.Add('the update archive held no recognisable app folder; falling back to the installer stub')
               }
             } elseif ($stub) {
               $note.Add(('no update archive; falling back to ' + $stub.Name))
             }
 
             if ($appDir) {
-              Compress-Archive -Path (Join-Path $appDir '*') -DestinationPath $named
+              # keep the folder inside the zip: the app expects its own directory
+              Compress-Archive -LiteralPath $appDir -DestinationPath $named
             } elseif ($stub) {
               Copy-Item -LiteralPath $stub.FullName -Destination $named
             } elseif ($files.Count -gt 0) {
@@ -186,16 +205,20 @@ jobs:
           if (-not $zip) { throw 'no *-latest.zip was produced' }
           $out = Join-Path $env:RUNNER_TEMP 'zipcheck'
           Expand-Archive -LiteralPath $zip.FullName -DestinationPath $out -Force
-          $exe = Get-ChildItem $out -Recurse -Filter *.exe | Select-Object -First 1
+          $exe = Get-ChildItem $out -Recurse -Filter 'launcher.exe' | Select-Object -First 1
+          if (-not $exe) { $exe = Get-ChildItem $out -Recurse -Filter *.exe | Sort-Object Length -Descending | Select-Object -First 1 }
           if (-not $exe) {
             $seen = (Get-ChildItem $out -Recurse -File | Select-Object -First 20 | ForEach-Object { $_.Name }) -join ', '
             throw "the zip contains no .exe, only: $seen"
           }
+          # a stub-only zip is the bug this check exists to catch
+          if ($exe.Length -lt 5MB) { throw ('the zip holds only a small executable (' + $exe.Name + ', ' + [math]::Round($exe.Length / 1MB, 1) + ' MB): packaging grabbed the installer stub, not the app') }
           Write-Host ('zip contains ' + $exe.Name + ' (' + [math]::Round($exe.Length / 1MB, 1) + ' MB)')
           # Visible on the run page without downloading anything.
           $top = @(Get-ChildItem $out | ForEach-Object { $_.Name })
           $count = @(Get-ChildItem $out -Recurse -File).Count
-          $line = 'zip holds ' + $exe.Name + ' (' + [math]::Round($exe.Length / 1MB, 1) + ' MB), ' + $count + ' files, top level: ' + ($top -join ', ')
+          $inside = $exe.FullName.Substring($out.Length).TrimStart('\', '/')
+          $line = 'zip holds ' + $count + ' files, run "' + $inside + '" (' + [math]::Round($exe.Length / 1MB, 1) + ' MB), top level: ' + ($top -join ', ')
           Write-Host $line
           Write-Host ('::notice title=Windows zip::' + $line)
           $line >> $env:GITHUB_STEP_SUMMARY
